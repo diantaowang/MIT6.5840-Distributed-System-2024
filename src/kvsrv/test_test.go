@@ -1,6 +1,9 @@
 package kvsrv
 
 import (
+	"log"
+	"runtime"
+
 	"6.5840/models"
 	"6.5840/porcupine"
 
@@ -325,7 +328,7 @@ func TestConcurrent2(t *testing.T) {
 }
 
 // Test: unreliable net, many clients
-/*func TestUnreliable2(t *testing.T) {
+func TestUnreliable2(t *testing.T) {
 	GenericTest(t, 5, true, false)
 }
 
@@ -602,4 +605,3 @@ func TestMemManyAppends(t *testing.T) {
 	cfg.deleteClient(ck)
 	cfg.end()
 }
-*/
