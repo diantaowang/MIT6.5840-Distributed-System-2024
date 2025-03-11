@@ -115,6 +115,12 @@ func max(a int, b int) int {
 	return a
 }
 
+func assert(satisfied bool, s string) {
+	if !satisfied {
+		fmt.Println("assert failed:" + s)
+	}
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -376,6 +382,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		logIndex := args.PrevLogIndex - rf.lastIncludedIndex
 		if completeLogLen < args.PrevLogIndex {
 			reply.Success = false
+		} else if logIndex == 0 {
+			// NOTE: when rf log is empty, rf.lastIncludedTerm == args.PrevLogTerm == 0.
+			assert(rf.lastIncludedTerm == args.PrevLogTerm, "impossible: term conflict with committed log")
+			logChanged = rf.appendEntries(0, 0, args)
+			reply.Success = true
+		} else if logIndex < 0 {
+			if args.PrevLogIndex+len(args.Entries) >= rf.lastIncludedIndex {
+				// in this branch, start > 0 and args.Entries is non-empty.
+				start := rf.lastIncludedIndex - args.PrevLogIndex
+				assert(args.Entries[start-1].Term == rf.lastIncludedTerm, "impossible: term conflict with committed log (2)")
+				logChanged = rf.appendEntries(0, start, args)
+			}
+			reply.Success = true
+		} else {
+			if rf.log[logIndex-1].Term == args.PrevLogTerm {
+				logChanged = rf.appendEntries(logIndex, 0, args)
+				reply.Success = true
+			} else {
+				// term conflict with log
+				conflict_term := rf.log[logIndex-1].Term
+				i := args.PrevLogIndex - rf.lastIncludedIndex
+				for i > 0 && rf.log[i-1].Term == conflict_term {
+					i--
+				}
+				rf.log = rf.log[:logIndex-1]
+				logChanged = true
+				reply.XTerm = conflict_term
+				reply.XIndex = rf.lastIncludedIndex + i + 1
+				reply.Success = false
+			}
+		}
+
+		/*if completeLogLen < args.PrevLogIndex {
+			reply.Success = false
 		} else if logIndex == 0 && rf.lastIncludedTerm != args.PrevLogTerm {
 			// NOTE: when args.PrevLogIndex==0, the rf.lastIncludedTerm and args.PrevLogTerm must be 0.
 			fmt.Printf("impossible: term conflict with committed log\n")
@@ -411,7 +451,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.XIndex = rf.lastIncludedIndex + i + 1
 			rf.log = rf.log[:logIndex-1]
 			logChanged = true
-		}
+		}*/
 	}
 
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor || logChanged {
@@ -419,6 +459,30 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	fmt.Printf("  Append Reply: reply.Term=%d, reply.Success=%t, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
 		reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
+}
+
+// rf.log[logStart:] <- args.Entries[entryStart:]
+func (rf *Raft) appendEntries(logStart int, entryStart int, args *AppendEntriesArgs) bool {
+	logChanged := false
+	j := entryStart
+	for i := logStart; j < len(args.Entries) && i < len(rf.log); i, j = i+1, j+1 {
+		if rf.log[i].Term != args.Entries[j].Term {
+			rf.log[i] = args.Entries[j]
+			logChanged = true
+		}
+	}
+	if len(args.Entries[j:]) != 0 {
+		rf.log = append(rf.log, args.Entries[j:]...)
+		logChanged = true
+	}
+	if args.LeaderCommit > rf.commitIndex {
+		nextCommitIndex := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+		if nextCommitIndex > rf.commitIndex {
+			rf.commitIndex = nextCommitIndex
+			rf.cond.Signal()
+		}
+	}
+	return logChanged
 }
 
 // example code to send a RequestVote RPC to a server.
