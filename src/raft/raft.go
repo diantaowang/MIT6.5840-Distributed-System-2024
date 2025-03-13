@@ -33,6 +33,12 @@ import (
 	"6.5840/labrpc"
 )
 
+// for debug
+var debugCommon = false
+var debugVote = false
+var debugAppend = false
+var debugSnapshout = false
+
 // as each Raft peer becomes aware that successive log Entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -182,10 +188,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var currentTerm = 0
-	var votedFor = -1
-	var lastIncludedIndex = 0
-	var lastIncludedTerm = 0
+	var currentTerm, votedFor, lastIncludedIndex, lastIncludedTerm int
 	var log = []Entry{}
 	if err := d.Decode(&currentTerm); err != nil {
 		fmt.Printf("readPersist(): decode currentTerm: %v\n", err)
@@ -219,10 +222,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 
 	dropNum := index - rf.lastIncludedIndex
-	/*if dropNum != SnapShotInterval {
-		fmt.Printf("Snapshot: drop num error, index=%d, rf.lastIncludedIndex=%d\n",
-			index, rf.lastIncludedIndex)
-	}*/
 	/*fmt.Printf("Snapshot: node-%d, dropNum= %d, index=%d, rf.lastIncludedIndex=%d\n",
 	rf.me, dropNum, index, rf.lastIncludedIndex)*/
 	rf.lastIncludedIndex = index
@@ -298,11 +297,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	/*fmt.Println("RequestVote RPC:")
-	fmt.Printf("  Req Context: CandidateId=%d, Term=%d, LastLogIndex=%d, LastLogTerm=%d\n",
-		args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
-	fmt.Printf("  Raft Node:  node-%d, state=%d, currentTerm=%d, votedFor=%d\n",
-		rf.me, rf.state, rf.currentTerm, rf.votedFor)*/
+	if debugVote {
+		fmt.Println("RequestVote RPC:")
+		fmt.Printf("  Vote Req Context: CandidateId=%d, Term=%d, LastLogIndex=%d, LastLogTerm=%d\n",
+			args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
+		fmt.Printf("  Vote Raft Node:  node-%d, state=%d, currentTerm=%d, votedFor=%d\n",
+			rf.me, rf.state, rf.currentTerm, rf.votedFor)
+	}
 
 	oldCurrentTerm := rf.currentTerm
 	oldVotedFor := rf.votedFor
@@ -347,25 +348,29 @@ aftervote:
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor {
 		rf.persist()
 	}
-	/*fmt.Printf("  After Vote: Id=%d, state=%d, currentTerm=%d, votedFor=%d\n",
-		rf.me, rf.state, rf.currentTerm, rf.votedFor)
-	fmt.Printf("  Vote Reply: reply.Term=%d, reply.VoteGranted=%t\n",
-		reply.Term, reply.VoteGranted)*/
+	if debugVote {
+		fmt.Printf("  After Vote: Id=%d, state=%d, currentTerm=%d, votedFor=%d\n",
+			rf.me, rf.state, rf.currentTerm, rf.votedFor)
+		fmt.Printf("  Vote Reply: reply.Term=%d, reply.VoteGranted=%t\n",
+			reply.Term, reply.VoteGranted)
+	}
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	firstEntry := Entry{}
-	if len(args.Entries) != 0 {
-		firstEntry = args.Entries[0]
+	if debugAppend {
+		firstEntry := Entry{}
+		if len(args.Entries) != 0 {
+			firstEntry = args.Entries[0]
+		}
+		fmt.Println("AppendEntries RPC:")
+		fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, FirstEntry=%v, to-node-%d\n",
+			args.ID, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), firstEntry, rf.me)
+		fmt.Printf("  Append Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d\n",
+			rf.me, rf.state, rf.currentTerm, len(rf.log))
 	}
-	fmt.Println("AppendEntries RPC:")
-	fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, FirstEntry=%v, to-node-%d\n",
-		args.ID, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), firstEntry, rf.me)
-	fmt.Printf("  Append Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d\n",
-		rf.me, rf.state, rf.currentTerm, len(rf.log))
 
 	oldCurrentTerm := rf.currentTerm
 	oldVotedFor := rf.votedFor
@@ -435,19 +440,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor || logChanged {
 		rf.persist()
 	}
-	fmt.Printf("  Append Reply: node-%d, reply.Term=%d, reply.Success=%t, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
-		rf.me, reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
+	if debugAppend {
+		fmt.Printf("  Append Reply: node-%d, reply.Term=%d, reply.Success=%t, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
+			rf.me, reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
+	}
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	fmt.Println("InstallSnapshot RPC:")
-	fmt.Printf("  Install Context: ID=%d, LeaderId=%d, Term=%d, lastIncludedIndex=%d, lastIncludedTerm=%d, FirstData=%v, DataLen=%d\n",
-		args.ID, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludeTerm, args.Data[0], len(args.Data))
-	fmt.Printf("  Install Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d, lastIncludedTerm=%d\n",
-		rf.me, rf.state, rf.currentTerm, len(rf.log), rf.lastIncludedIndex, rf.lastIncludedTerm)
+	if debugSnapshout {
+		fmt.Println("InstallSnapshot RPC:")
+		fmt.Printf("  Install Context: ID=%d, LeaderId=%d, Term=%d, lastIncludedIndex=%d, lastIncludedTerm=%d, FirstData=%v, DataLen=%d\n",
+			args.ID, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludeTerm, args.Data[0], len(args.Data))
+		fmt.Printf("  Install Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d, lastIncludedTerm=%d\n",
+			rf.me, rf.state, rf.currentTerm, len(rf.log), rf.lastIncludedIndex, rf.lastIncludedTerm)
+	}
 
 	oldCurrentTerm := rf.currentTerm
 	oldVotedFor := rf.votedFor
@@ -483,9 +492,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor || othersChanged {
 		rf.persist()
 	}
-
-	fmt.Printf("  Install Reply: node-%d, reply.Term=%d,  rf.state=%v, rf.lastIncludedIndex=%d, rf.lastIncludedTerm=%d\n",
-		rf.me, reply.Term, rf.state, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	if debugSnapshout {
+		fmt.Printf("  Install Reply: node-%d, reply.Term=%d,  rf.state=%v, rf.lastIncludedIndex=%d, rf.lastIncludedTerm=%d\n",
+			rf.me, reply.Term, rf.state, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	}
 }
 
 // rf.log[logStart:] <- args.Entries[entryStart:]
@@ -597,8 +607,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if args.Term < rf.currentTerm {
 		return ok
 	}
-
-	if ok {
+	if debugAppend && ok {
 		fmt.Printf("**** reply from node-%d: ID=%d, reply.Term=%d, reply.Success=%v, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
 			server, reply.ID, reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
 	}
@@ -654,7 +663,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor {
 		rf.persist()
 	}
-	if ok {
+	if debugAppend && ok {
 		fmt.Printf("**** after reply: node-%d, nextIndex[%d]=%d, matchIndex[%d]=%d\n\n",
 			server, server, rf.nextIndex[server], server, rf.matchIndex[server])
 	}
@@ -850,7 +859,9 @@ func (rf *Raft) appendEntiresOrSnapshot() {
 func (rf *Raft) initLeader() {
 	// must hold mutex
 	rf.state = Leader
-	fmt.Printf("node-%d (term=%d) become leader\n", rf.me, rf.currentTerm)
+	if debugCommon {
+		fmt.Printf("node-%d (term=%d) become leader\n", rf.me, rf.currentTerm)
+	}
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			rf.nextIndex[i] = rf.lastIncludedIndex + len(rf.log) + 1
@@ -964,7 +975,9 @@ func (rf *Raft) ticker() {
 		//fmt.Printf("node-%d: state=%d, now=%d, startTime=%d, electionTime=%d, passedTime=%d\n",
 		//	rf.me, rf.state, timeNow, rf.startTime, rf.electionTime, timeNow-rf.startTime)
 		if rf.state != Leader && timeout {
-			fmt.Printf("node-%d timeout\n", rf.me)
+			if debugCommon {
+				fmt.Printf("node-%d timeout\n", rf.me)
+			}
 			rf.election()
 		}
 		rf.mu.Unlock()
@@ -1013,6 +1026,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.cond = sync.NewCond(&rf.mu)
 
 	// initialize from state persisted before a crash
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
+	rf.log = []Entry{}
 	rf.readPersist(persister.ReadRaftState())
 	rf.snapshot = persister.ReadSnapshot()
 
