@@ -734,9 +734,9 @@ func (rf *Raft) applyToSM() {
 			msg.Snapshot = rf.snapshot
 			msg.SnapshotIndex = rf.lastIncludedIndex
 			msg.SnapshotTerm = rf.lastIncludedTerm
+			rf.lastApplied = rf.lastIncludedIndex
 			rf.mu.Unlock()
 			rf.applyCh <- msg
-			rf.lastApplied = rf.lastIncludedIndex
 		} else {
 			msgs := []ApplyMsg{}
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -747,11 +747,11 @@ func (rf *Raft) applyToSM() {
 				msg.CommandIndex = i
 				msgs = append(msgs, msg)
 			}
+			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
 			for _, msg := range msgs {
 				rf.applyCh <- msg
 			}
-			rf.lastApplied = rf.commitIndex
 		}
 	}
 }
