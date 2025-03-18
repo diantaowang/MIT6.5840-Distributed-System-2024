@@ -104,6 +104,7 @@ type Raft struct {
 	startTime    int64
 	electionTime int
 	cond         *sync.Cond
+	startCh      chan byte
 }
 
 func min(a int, b int) int {
@@ -853,7 +854,16 @@ func (rf *Raft) appendEntiresOrSnapshot() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(120) * time.Millisecond)
+		ticker := time.NewTicker(time.Duration(120) * time.Millisecond)
+		select {
+		case <-rf.startCh:
+			ticker.Stop()
+		case <-ticker.C:
+		}
+		//time.Sleep(time.Duration(120) * time.Millisecond)
+	}
+	// release hanging go routine
+	for range rf.startCh {
 	}
 }
 
@@ -900,6 +910,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, Entry{rf.currentTerm, command})
 		index = rf.lastIncludedIndex + len(rf.log)
 		term = int(rf.currentTerm)
+		go func() {
+			if !rf.killed() {
+				rf.startCh <- 'a'
+			}
+		}()
 	}
 	rf.mu.Unlock()
 
@@ -922,6 +937,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	close(rf.startCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -1025,6 +1041,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTime = rf.genElectionTime()
 
 	rf.cond = sync.NewCond(&rf.mu)
+	rf.startCh = make(chan byte)
 
 	// initialize from state persisted before a crash
 	rf.currentTerm = 0
