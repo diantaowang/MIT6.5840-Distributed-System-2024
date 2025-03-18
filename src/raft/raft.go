@@ -860,9 +860,13 @@ func (rf *Raft) appendEntiresOrSnapshot() {
 			ticker.Stop()
 		case <-ticker.C:
 		}
-		//time.Sleep(time.Duration(120) * time.Millisecond)
 	}
-	// release hanging go routine
+	// in extreme cases, Start() may deadlock.
+	// t0: server is alive and try to send a new command to startCh. but
+	//     startCh is full, Start() is blocked.
+	// t1: server is killed and he data in the startCh is not consumed.
+	//     Start() is blocked forever.
+	// so, we need  an additional loop to consume the data in startCh.
 	for range rf.startCh {
 	}
 }
@@ -898,31 +902,29 @@ func (rf *Raft) initLeader() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := 0
 	term := 0
-	isLeader := true
+	aliveLeader := true
 
 	// Your code here (3B).
 	rf.mu.Lock()
 	if rf.killed() || rf.state != Leader {
-		isLeader = false
+		aliveLeader = false
 	} else {
 		/*fmt.Printf("Start: node-%d, logLen=%d, currentTerm=%d, command=%v\n",
 		rf.me, len(rf.log), rf.currentTerm, command)*/
 		rf.log = append(rf.log, Entry{rf.currentTerm, command})
 		index = rf.lastIncludedIndex + len(rf.log)
 		term = int(rf.currentTerm)
-		go func() {
-			if !rf.killed() {
-				rf.startCh <- 'a'
-			}
-		}()
 	}
 	rf.mu.Unlock()
 
-	if isLeader {
+	if aliveLeader {
+		// in extreme cases, we may send data to a close channel.
+		// don't worry.
+		rf.startCh <- 'a'
 		rf.persist()
 	}
 
-	return index, term, isLeader
+	return index, term, aliveLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -1041,7 +1043,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTime = rf.genElectionTime()
 
 	rf.cond = sync.NewCond(&rf.mu)
-	rf.startCh = make(chan byte)
+	rf.startCh = make(chan byte, 3)
 
 	// initialize from state persisted before a crash
 	rf.currentTerm = 0
