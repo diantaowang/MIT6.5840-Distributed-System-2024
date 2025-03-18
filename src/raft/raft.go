@@ -52,6 +52,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 3D:
 	SnapshotValid bool
@@ -315,12 +316,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// a raft node must be Follower when voteFor is null.
-	if rf.votedFor == -1 && rf.state != Follower {
-		fmt.Printf("impossible: votedFor == -1 && state != Follower\n")
-	}
+	assert(!(rf.votedFor == -1 && rf.state != Follower), "votedFor == -1 && state != Follower")
 
 	if args.Term == rf.currentTerm && rf.votedFor == args.CandidateId {
-		fmt.Printf("impossible: votedFor == CandidateId\n")
+		fmt.Printf("impossible: term == currentTerm && votedFor == CandidateId\n")
 	} else if args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		reply.Term = args.Term
 		reply.VoteGranted = false
@@ -754,6 +753,7 @@ func (rf *Raft) applyToSM() {
 				msg.SnapshotValid = false
 				msg.Command = rf.log[i-rf.lastIncludedIndex-1].Command
 				msg.CommandIndex = i
+				msg.CommandTerm = rf.log[i-rf.lastIncludedIndex-1].Term
 				msgs = append(msgs, msg)
 			}
 			rf.lastApplied = rf.commitIndex
@@ -763,6 +763,7 @@ func (rf *Raft) applyToSM() {
 			}
 		}
 	}
+	close(rf.applyCh)
 }
 
 func (rf *Raft) genAppendEntriesArgs(server int, heartbeat bool) AppendEntriesArgs {
