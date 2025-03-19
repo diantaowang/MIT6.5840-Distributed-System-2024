@@ -368,8 +368,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		fmt.Println("AppendEntries RPC:")
 		fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, FirstEntry=%v, to-node-%d\n",
 			args.ID, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), firstEntry, rf.me)
-		fmt.Printf("  Append Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d\n",
-			rf.me, rf.state, rf.currentTerm, len(rf.log))
+		fmt.Printf("  Append Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d\n",
+			rf.me, rf.state, rf.currentTerm, len(rf.log), rf.lastIncludedIndex)
 	}
 
 	oldCurrentTerm := rf.currentTerm
@@ -718,15 +718,17 @@ func (rf *Raft) advLeaderCommitIndex() {
 		}
 	}
 	sort.Ints(rf.sortedIndex)
-	nextCommitIndex := rf.sortedIndex[len(rf.peers)/2]
+	newCommitIndex := rf.sortedIndex[len(rf.peers)/2]
 	/*if nextCommitIndex > 0 {
 		fmt.Printf("advance: commitIndex=%d, nextCommitIndex=%d; currentTerm=%d, nextTerm=%d\n",
 		rf.commitIndex, nextCommitIndex, rf.currentTerm, rf.log[nextCommitIndex-1].Term)
 	}*/
-	if nextCommitIndex > rf.commitIndex &&
-		rf.log[nextCommitIndex-rf.lastIncludedIndex-1].Term == rf.currentTerm {
-		rf.commitIndex = nextCommitIndex
-		rf.cond.Signal()
+	if newCommitIndex == rf.lastIncludedIndex && rf.lastIncludedTerm == rf.currentTerm ||
+		newCommitIndex > rf.lastIncludedIndex && rf.log[newCommitIndex-rf.lastIncludedIndex-1].Term == rf.currentTerm {
+		if newCommitIndex > rf.commitIndex {
+			rf.commitIndex = newCommitIndex
+			rf.cond.Signal()
+		}
 	}
 }
 
@@ -877,6 +879,10 @@ func (rf *Raft) initLeader() {
 	if debugCommon {
 		fmt.Printf("node-%d (term=%d) become leader\n", rf.me, rf.currentTerm)
 	}
+	// add a blank no-op entry into log.
+	// NOTE: can't pass some tests in Lab3 due to defects in the tests.
+	rf.log = append(rf.log, Entry{rf.currentTerm, nil})
+	rf.persist()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			rf.nextIndex[i] = rf.lastIncludedIndex + len(rf.log) + 1
@@ -900,31 +906,25 @@ func (rf *Raft) initLeader() {
 // Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := 0
-	term := 0
-	aliveLeader := true
-
 	// Your code here (3B).
 	rf.mu.Lock()
 	if rf.killed() || rf.state != Leader {
-		aliveLeader = false
-	} else {
-		/*fmt.Printf("Start: node-%d, logLen=%d, currentTerm=%d, command=%v\n",
-		rf.me, len(rf.log), rf.currentTerm, command)*/
-		rf.log = append(rf.log, Entry{rf.currentTerm, command})
-		index = rf.lastIncludedIndex + len(rf.log)
-		term = int(rf.currentTerm)
+		rf.mu.Unlock()
+		return 0, 0, false
 	}
+
+	/*fmt.Printf("Start: node-%d, logLen=%d, currentTerm=%d, command=%v\n",
+	rf.me, len(rf.log), rf.currentTerm, command)*/
+	rf.log = append(rf.log, Entry{rf.currentTerm, command})
+	index := rf.lastIncludedIndex + len(rf.log)
+	term := rf.currentTerm
 	rf.mu.Unlock()
 
-	if aliveLeader {
-		// in extreme cases, we may send data to a close channel.
-		// don't worry.
-		rf.startCh <- 'a'
-		rf.persist()
-	}
+	// in extreme cases, we may send data to a close channel.
+	rf.startCh <- 'a'
+	rf.persist()
 
-	return index, term, aliveLeader
+	return index, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
