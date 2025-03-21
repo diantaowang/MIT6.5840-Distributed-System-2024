@@ -55,12 +55,14 @@ func (ck *Clerk) Get(key string) string {
 	server := ck.leader
 	for {
 		reply.Err, reply.Value = "", ""
-		log.Printf("Client-%d Get start: key=%s, to node-%d\n", ck.clerkId, key, server)
+		//log.Printf("Client-%d Get start: key=%s, to server-%d\n", ck.clerkId, key, ck.servers[server].Server)
+		log.Printf("Client-%d Get start: key=%s, to server-%d\n", ck.clerkId, key, server)
 		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
 		// what situations lead to return false?
 		// (1) request loss (2) reply loss (3) server crash.
 		if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 			ck.leader = server
+			//log.Printf("Client-%d Get finish: key=%s, value=%s, to server-%d\n", ck.clerkId, key, reply.Value, ck.servers[server].Server)
 			log.Printf("Client-%d Get finish: key=%s, value=%s, to server-%d\n", ck.clerkId, key, reply.Value, server)
 			return reply.Value
 		}
@@ -70,54 +72,6 @@ func (ck *Clerk) Get(key string) string {
 		server = (server + 1) % len(ck.servers)
 	}
 }
-
-/*func (ck *Clerk) Get(key string) string {
-	// You will have to modify this function.
-	args := GetArgs{}
-	args.Key = key
-	args.ClerkId = ck.clerkId
-	args.TaskId = ck.nextTaskId
-	ck.nextTaskId++
-	for i := ck.leader; ; i = (i + 1) % len(ck.servers) {
-		reply := GetReply{}
-		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-		if ok && reply.Err == OK {
-			ck.leader = i
-			return reply.Value
-		} else if ok && reply.Err == ErrNoKey {
-			ck.leader = i
-			return ""
-		} else if ok && reply.Err != ErrWrongLeader {
-			fmt.Printf("ERROR: Get() return undefined reply\n")
-		}
-	}
-
-	var i, tryCnt = ck.leader, 0
-	for {
-		reply := GetReply{}
-		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
-		if ok {
-			if reply.Err == OK {
-				ck.leader = i
-				return reply.Value
-			} else if ok && reply.Err == ErrNoKey {
-				ck.leader = i
-				return ""
-			} else if ok && reply.Err == ErrWrongLeader {
-				tryCnt = 0
-				i = (i + 1) % len(ck.servers)
-			} else if ok {
-				fmt.Printf("Get: unknown reply.Err\n")
-			}
-		} else {
-			tryCnt++
-			if tryCnt == 2 {
-				tryCnt = 0
-				i = (i + 1) % len(ck.servers)
-			}
-		}
-	}
-}*/
 
 // shared by Put and Append.
 //
@@ -139,13 +93,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	server := ck.leader
 	for {
 		reply.Err = ""
-		log.Printf("Client-%d %s begin: key=%s, value=%s, to node-%d\n", ck.clerkId, op, key, value, server)
+		//log.Printf("Client-%d %s begin: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, ck.servers[server].Server)
+		log.Printf("Client-%d %s begin: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, server)
 		// what situations lead to return false?
 		// (1) request loss (2) reply loss (3) server crash.
 		ok := ck.servers[server].Call("KVServer."+op, &args, &reply)
 		if ok && reply.Err == OK {
 			ck.leader = server
-			log.Printf("Client-%d %s finish: key=%s, value=%s, to node-%d\n", ck.clerkId, op, key, value, server)
+			//log.Printf("Client-%d %s finish: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, ck.servers[server].Server)
+			log.Printf("Client-%d %s finish: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, server)
 			return
 		}
 		if ok && reply.Err == ErrNoKey {
@@ -158,28 +114,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		server = (server + 1) % len(ck.servers)
 	}
 }
-
-/*func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.ClerkId = ck.clerkId
-	args.TaskId = ck.nextTaskId
-	ck.nextTaskId++
-	for i := ck.leader; ; i = (i + 1) % len(ck.servers) {
-		reply := PutAppendReply{}
-		ok := ck.servers[i].Call("KVServer."+op, &args, &reply)
-		if ok && reply.Err == OK {
-			ck.leader = i
-			break
-		} else if ok && reply.Err == ErrNoKey {
-			fmt.Printf("ERROR: PutAppend() return ErrNoKey\n")
-		} else if ok && reply.Err != ErrWrongLeader {
-			fmt.Printf("ERROR: PutAppend() return undefined reply\n")
-		}
-	}
-}*/
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
