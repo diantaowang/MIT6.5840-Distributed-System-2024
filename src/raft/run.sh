@@ -21,8 +21,8 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "Starting test iteration $i (log: $LOG_FILE)..."
 
     # 启动一个测试并保存日志
-    (go test -timeout=$TIMEOUT -v ./... > "$LOG_FILE" 2>&1) &
-    #(go test -timeout=$TIMEOUT -v -run TestReliableChurn3C > "$LOG_FILE" 2>&1) &
+    (go test -timeout=$TIMEOUT -count=1 -v ./... > "$LOG_FILE" 2>&1) &
+    #(go test -timeout=$TIMEOUT -v -run TestSnapshotBasic3D > "$LOG_FILE" 2>&1) &
 
     # 计数正在运行的测试
     ((running_jobs++))

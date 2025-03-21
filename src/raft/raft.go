@@ -34,10 +34,10 @@ import (
 )
 
 // for debug
-var debugCommon = false
+var debugCommon = true
 var debugVote = false
 var debugAppend = false
-var debugSnapshout = false
+var debugSnapshot = false
 
 // as each Raft peer becomes aware that successive log Entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -52,7 +52,6 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-	CommandTerm  int
 
 	// For 3D:
 	SnapshotValid bool
@@ -104,7 +103,7 @@ type Raft struct {
 	startTime    int64
 	electionTime int
 	cond         *sync.Cond
-	startCh      chan byte
+	startCh      chan struct{}
 }
 
 func min(a int, b int) int {
@@ -224,13 +223,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 
 	dropNum := index - rf.lastIncludedIndex
-	/*fmt.Printf("Snapshot: node-%d, dropNum= %d, index=%d, rf.lastIncludedIndex=%d\n",
-	rf.me, dropNum, index, rf.lastIncludedIndex)*/
-	rf.lastIncludedIndex = index
-	rf.lastIncludedTerm = rf.log[dropNum-1].Term
-	rf.snapshot = snapshot
-	rf.log = rf.log[dropNum:]
-	rf.persist()
+	//fmt.Printf("Snapshot: node-%d, dropNum= %d, index=%d, rf.lastIncludedIndex=%d\n",
+	//	rf.me, dropNum, index, rf.lastIncludedIndex)
+	// drop outdated snapshot
+	if dropNum > 0 {
+		rf.lastIncludedIndex = index
+		rf.lastIncludedTerm = rf.log[dropNum-1].Term
+		rf.snapshot = snapshot
+		rf.log = rf.log[dropNum:]
+		rf.persist()
+	}
 }
 
 // example RequestVote RPC arguments structure.
@@ -450,7 +452,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if debugSnapshout {
+	if debugSnapshot {
 		fmt.Println("InstallSnapshot RPC:")
 		fmt.Printf("  Install Context: ID=%d, LeaderId=%d, Term=%d, lastIncludedIndex=%d, lastIncludedTerm=%d, FirstData=%v, DataLen=%d\n",
 			args.ID, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludeTerm, args.Data[0], len(args.Data))
@@ -492,9 +494,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor || othersChanged {
 		rf.persist()
 	}
-	if debugSnapshout {
-		fmt.Printf("  Install Reply: node-%d, reply.Term=%d,  rf.state=%v, rf.lastIncludedIndex=%d, rf.lastIncludedTerm=%d\n",
-			rf.me, reply.Term, rf.state, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	if debugSnapshot {
+		fmt.Printf("  Install Reply: node-%d, reply.Term=%d,  rf.state=%v, rf.lastIncludedIndex=%d, rf.lastIncludedTerm=%d, len(rf.log)=%d\n",
+			rf.me, reply.Term, rf.state, rf.lastIncludedIndex, rf.lastIncludedTerm, len(rf.log))
 	}
 }
 
@@ -748,7 +750,7 @@ func (rf *Raft) applyToSM() {
 			rf.lastApplied = rf.lastIncludedIndex
 			rf.mu.Unlock()
 			rf.applyCh <- msg
-		} else {
+		} else if rf.lastApplied < rf.commitIndex {
 			msgs := []ApplyMsg{}
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				msg := ApplyMsg{}
@@ -756,7 +758,6 @@ func (rf *Raft) applyToSM() {
 				msg.SnapshotValid = false
 				msg.Command = rf.log[i-rf.lastIncludedIndex-1].Command
 				msg.CommandIndex = i
-				msg.CommandTerm = rf.log[i-rf.lastIncludedIndex-1].Term
 				msgs = append(msgs, msg)
 			}
 			rf.lastApplied = rf.commitIndex
@@ -866,11 +867,11 @@ func (rf *Raft) appendEntiresOrSnapshot() {
 	// in extreme cases, Start() may deadlock.
 	// t0: server is alive and try to send a new command to startCh. but
 	//     startCh is full, Start() is blocked.
-	// t1: server is killed and he data in the startCh is not consumed.
+	// t1: server is killed and the data in the startCh is not consumed.
 	//     Start() is blocked forever.
-	// so, we need  an additional loop to consume the data in startCh.
-	for range rf.startCh {
-	}
+	// so, we need an additional loop to consume the data in startCh.
+	/*for range rf.startCh {
+	}*/
 }
 
 func (rf *Raft) initLeader() {
@@ -881,8 +882,8 @@ func (rf *Raft) initLeader() {
 	}
 	// add a blank no-op entry into log.
 	// NOTE: can't pass some tests in Lab3 due to defects in the tests.
-	rf.log = append(rf.log, Entry{rf.currentTerm, nil})
-	rf.persist()
+	// rf.log = append(rf.log, Entry{rf.currentTerm, nil})
+	// rf.persist()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			rf.nextIndex[i] = rf.lastIncludedIndex + len(rf.log) + 1
@@ -918,11 +919,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, Entry{rf.currentTerm, command})
 	index := rf.lastIncludedIndex + len(rf.log)
 	term := rf.currentTerm
+	rf.persist()
 	rf.mu.Unlock()
 
-	// in extreme cases, we may send data to a close channel.
-	rf.startCh <- 'a'
-	rf.persist()
+	select {
+	case rf.startCh <- struct{}{}:
+	default:
+		// log.Printf("startCh is full... AppendEntries/InstallSnapshot can't get mutex...")
+	}
 
 	return index, term, true
 }
@@ -939,7 +943,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	close(rf.startCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -1043,7 +1046,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTime = rf.genElectionTime()
 
 	rf.cond = sync.NewCond(&rf.mu)
-	rf.startCh = make(chan byte, 3)
+	rf.startCh = make(chan struct{})
 
 	// initialize from state persisted before a crash
 	rf.currentTerm = 0

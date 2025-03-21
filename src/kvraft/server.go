@@ -14,29 +14,39 @@ import (
 )
 
 const (
-	GET = iota
-	PUT
-	APPEND
+	GET    = '0'
+	PUT    = '1'
+	APPEND = '2'
 )
 
-const (
-	SUCCESSFUL = true
-	FAILED     = false
-)
+var OpCode = map[string]int{
+	"GET":    GET,
+	"PUT":    PUT,
+	"APPEND": APPEND,
+}
+
+const TIMEOUT = 1*time.Second + 500*time.Millisecond
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Cmd   int
-	Key   string
-	Value string
+	Cmd     int
+	Key     string
+	Value   string
+	ClerkId int64
+	TaskId  int64
+}
+
+type DoneMsg struct {
+	applyId int
+	taskId  int64
+	value   string
 }
 
 type Task struct {
 	id    int64
 	value string
-	state bool
 }
 
 type KVServer struct {
@@ -50,188 +60,148 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvs       map[string]string
-	taskmu    sync.Mutex
+	doneChs   map[int64]chan DoneMsg
 	lastTasks map[int64]Task
-	log       []int
-}
-
-func (kv *KVServer) atomicReadTask(clerkId int64) (Task, bool) {
-	kv.taskmu.Lock()
-	defer kv.taskmu.Unlock()
-	lastTask, ok := kv.lastTasks[clerkId]
-	return lastTask, ok
-}
-
-func (kv *KVServer) atomicWriteTask(clerkId int64, task Task) {
-	kv.taskmu.Lock()
-	defer kv.taskmu.Unlock()
-	kv.lastTasks[clerkId] = task
 }
 
 // Get/Put/Append from the same clerk has no concurrency promised by labrpc
 // (this situation does not match the actual network).
 // and Get/Put/Append from different clerks has concurrency.
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	log.Printf("Server-%d Get start", kv.me)
+	log.Printf("  -- Server-%d Get start", kv.me)
 
-	clerkId := args.ClerkId
-	taskId := args.TaskId
-	lastTask, ok := kv.atomicReadTask(clerkId)
-
-	if ok && lastTask.id > taskId {
-		DPrintf("Server Get(): concurrency not supposed by labrpc\n")
+	done := make(chan DoneMsg)
+	kv.mu.Lock()
+	if _, ok := kv.doneChs[args.ClerkId]; ok {
+		fmt.Printf("ERROR")
 	}
-	if ok && lastTask.id == taskId && lastTask.state == SUCCESSFUL {
-		reply.Err = OK
-		reply.Value = lastTask.value
-	} else {
-		op := Op{}
-		op.Cmd = GET
-		op.Key = args.Key
-		index, term, isLeader := kv.rf.Start(op)
-		if !isLeader {
-			reply.Err = ErrWrongLeader
-			reply.Value = ""
-			kv.atomicWriteTask(clerkId, Task{taskId, "", FAILED})
+	kv.doneChs[args.ClerkId] = done
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.doneChs, args.ClerkId)
+		kv.mu.Unlock()
+	}()
+
+	op := Op{GET, args.Key, "", args.ClerkId, args.TaskId}
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		log.Printf("  -- Server-%d Get end: ErrWrongLeader-1", kv.me)
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	log.Printf("  -- Server-%d Get waiting... index=%d", kv.me, index)
+
+	select {
+	case msg := <-done:
+		if msg.applyId == index && msg.taskId == args.TaskId {
+			log.Printf("  -- Server-%d Get end: OK", kv.me)
+			reply.Err = OK
+			reply.Value = msg.value
 		} else {
-			log.Printf("  -- waiting for consensus: server-%d, get op", kv.me)
-			for len(kv.log) < index {
-				time.Sleep(10 * time.Millisecond)
-			}
-			log.Printf("  -- wait end: server-%d, get op", kv.me)
-			if term == kv.log[index-1] {
-				kv.mu.Lock()
-				value, ok2 := kv.kvs[args.Key]
-				kv.mu.Unlock()
-				if ok2 {
-					reply.Err = OK
-					reply.Value = value
-					kv.atomicWriteTask(clerkId, Task{taskId, value, SUCCESSFUL})
-				} else {
-					reply.Err = ErrNoKey
-					reply.Value = ""
-					kv.atomicWriteTask(clerkId, Task{taskId, "", SUCCESSFUL})
-				}
-			} else {
-				reply.Err = ErrWrongLeader
-				reply.Value = ""
-				kv.atomicWriteTask(clerkId, Task{taskId, "", FAILED})
-			}
+			log.Printf("  -- Server-%d Get end: ErrWrongLeader-2", kv.me)
+			reply.Err = ErrWrongLeader
 		}
+	case <-time.After(TIMEOUT):
+		log.Printf("  -- Server-%d Get end: ErrTimeout, index=%d", kv.me, index)
+		reply.Err = ErrTimeout
+	}
+}
+
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply, oper string) {
+	log.Printf("  -- Server-%d %s start", kv.me, oper)
+
+	done := make(chan DoneMsg)
+	kv.mu.Lock()
+	if _, ok := kv.doneChs[args.ClerkId]; ok {
+		fmt.Printf("ERROR")
+	}
+	kv.doneChs[args.ClerkId] = done
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.doneChs, args.ClerkId)
+		kv.mu.Unlock()
+	}()
+
+	op := Op{OpCode[oper], args.Key, args.Value, args.ClerkId, args.TaskId}
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		log.Printf("  -- Server-%d %s end: ErrWrongLeader-1", kv.me, oper)
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	log.Printf("  -- Server-%d %s waiting... index=%d", kv.me, oper, index)
+
+	select {
+	case msg := <-done:
+		if msg.applyId == index && msg.taskId == args.TaskId {
+			log.Printf("  -- Server-%d %s end: OK", kv.me, oper)
+			reply.Err = OK
+		} else {
+			log.Printf("  -- Server-%d %s end: ErrWrongLeader-2", kv.me, oper)
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(TIMEOUT):
+		log.Printf("  -- Server-%d %s end: ErrTimeout, index=%d", kv.me, oper, index)
+		reply.Err = ErrTimeout
 	}
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
-	log.Printf("Server-%d Put start", kv.me)
-
-	clerkId := args.ClerkId
-	taskId := args.TaskId
-	lastTask, ok := kv.atomicReadTask(clerkId)
-
-	if ok && lastTask.id > taskId {
-		DPrintf("Server Put(): concurrency not supposed by labrpc\n")
-	}
-	if ok && lastTask.id == taskId && lastTask.state == SUCCESSFUL {
-		reply.Err = OK
-	} else {
-		op := Op{}
-		op.Cmd = PUT
-		op.Key = args.Key
-		op.Value = args.Value
-		index, term, isLeader := kv.rf.Start(op)
-		if !isLeader {
-			reply.Err = ErrWrongLeader
-			kv.atomicWriteTask(clerkId, Task{taskId, "", FAILED})
-		} else {
-			log.Printf("  -- waiting for consensus: server-%d, put op", kv.me)
-			for len(kv.log) < index {
-				time.Sleep(10 * time.Millisecond)
-			}
-			log.Printf("  -- wait end: server-%d, put op", kv.me)
-			if term == kv.log[index-1] {
-				reply.Err = OK
-				kv.atomicWriteTask(clerkId, Task{taskId, "", SUCCESSFUL})
-			} else {
-				reply.Err = ErrWrongLeader
-				kv.atomicWriteTask(clerkId, Task{taskId, "", FAILED})
-			}
-		}
-	}
+	kv.PutAppend(args, reply, "PUT")
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
-	log.Printf("Server-%d Append start", kv.me)
-
-	clerkId := args.ClerkId
-	taskId := args.TaskId
-	lastTask, ok := kv.atomicReadTask(clerkId)
-
-	if ok && lastTask.id > taskId {
-		DPrintf("Server Append(): concurrency not supposed by labrpc\n")
-	}
-	if ok && lastTask.id == taskId && lastTask.state == SUCCESSFUL {
-		reply.Err = OK
-	} else {
-		op := Op{}
-		op.Cmd = APPEND
-		op.Key = args.Key
-		op.Value = args.Value
-		index, term, isLeader := kv.rf.Start(op)
-		if !isLeader {
-			reply.Err = ErrWrongLeader
-			kv.atomicWriteTask(clerkId, Task{taskId, "", FAILED})
-		} else {
-			log.Printf("  -- waiting for consensus: server-%d, append op", kv.me)
-			for len(kv.log) < index {
-				time.Sleep(10 * time.Millisecond)
-			}
-			log.Printf("  -- wait end: server-%d, append op", kv.me)
-			if term == kv.log[index-1] {
-				reply.Err = OK
-				kv.atomicWriteTask(clerkId, Task{taskId, "", SUCCESSFUL})
-			} else {
-				reply.Err = ErrWrongLeader
-				kv.atomicWriteTask(clerkId, Task{taskId, "", FAILED})
-			}
-		}
-	}
+	kv.PutAppend(args, reply, "APPEND")
 }
 
 func (kv *KVServer) applier() {
 	// raft will send close signal by chan when kvserver is killed.
 	for m := range kv.applyCh {
 		if m.CommandValid {
-			if m.CommandIndex != len(kv.log)+1 {
-				DPrintf("applier ERROR: commandIndex does not match with log's length")
-			}
-			kv.mu.Lock()
-			kv.log = append(kv.log, m.CommandTerm)
-			kv.mu.Unlock()
 			op := reflect.ValueOf(m.Command)
 			cmd := op.FieldByName("Cmd").Int()
 			key := op.FieldByName("Key").String()
 			value := op.FieldByName("Value").String()
-			if cmd == GET {
-				// do nothing
-			} else if cmd == PUT {
-				kv.mu.Lock()
-				kv.kvs[key] = value
-				kv.mu.Unlock()
-			} else if cmd == APPEND {
-				kv.mu.Lock()
-				kv.kvs[key] = kv.kvs[key] + value
-				kv.mu.Unlock()
+			clerkId := op.FieldByName("ClerkId").Int()
+			taskId := op.FieldByName("TaskId").Int()
+
+			log.Printf("applier: server-%d, commandIndex=%d finished", kv.me, m.CommandIndex)
+
+			doneMsg := DoneMsg{}
+			doneMsg.applyId = m.CommandIndex
+			doneMsg.taskId = taskId
+			lastTask, ok := kv.lastTasks[clerkId]
+			// duplicate, do nothing
+			if ok && lastTask.id >= taskId {
+				if cmd == GET {
+					doneMsg.value = lastTask.value
+				}
 			} else {
-				DPrintf("applier: unknown command\n")
+				if cmd == GET {
+					doneMsg.value = kv.kvs[key]
+				} else if cmd == PUT {
+					kv.kvs[key] = value
+				} else {
+					kv.kvs[key] = kv.kvs[key] + value
+				}
+				kv.lastTasks[clerkId] = Task{taskId, doneMsg.value}
 			}
-		} else {
-			DPrintf("applier ERROR: invalid ApplyMsg\n")
+			kv.mu.Lock()
+			ch, ok2 := kv.doneChs[clerkId]
+			kv.mu.Unlock()
+			if ok2 {
+				ch <- doneMsg
+			}
 		}
 	}
-	fmt.Printf("kvserver-%d is killed\n", kv.me)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -281,8 +251,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvs = map[string]string{}
+	kv.doneChs = map[int64]chan DoneMsg{}
 	kv.lastTasks = map[int64]Task{}
-	kv.log = []int{}
 
 	go kv.applier()
 

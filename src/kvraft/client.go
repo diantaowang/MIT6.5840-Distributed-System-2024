@@ -59,15 +59,15 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
 		// what situations lead to return false?
 		// (1) request loss (2) reply loss (3) server crash.
-		if ok {
-			if reply.Err == OK || reply.Err == ErrNoKey {
-				ck.leader = server
-				log.Printf("Client-%d Get finish: key=%s, value=%s, to server-%d\n", ck.clerkId, key, reply.Value, server)
-				return reply.Value
-			} else {
-				server = (server + 1) % len(ck.servers)
-			}
+		if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+			ck.leader = server
+			log.Printf("Client-%d Get finish: key=%s, value=%s, to server-%d\n", ck.clerkId, key, reply.Value, server)
+			return reply.Value
 		}
+		if ok && reply.Err == ErrWrongLeader {
+			time.Sleep(10 * time.Millisecond)
+		}
+		server = (server + 1) % len(ck.servers)
 	}
 }
 
@@ -143,18 +143,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		// what situations lead to return false?
 		// (1) request loss (2) reply loss (3) server crash.
 		ok := ck.servers[server].Call("KVServer."+op, &args, &reply)
-		if ok {
-			if reply.Err == OK {
-				ck.leader = server
-				log.Printf("Client-%d %s finish: key=%s, value=%s, to node-%d\n", ck.clerkId, op, key, value, server)
-				break
-			} else if reply.Err == ErrWrongLeader {
-				server = (server + 1) % len(ck.servers)
-				time.Sleep(10 * time.Millisecond) // TODO: for debug
-			} else {
-				DPrintf("Client ERROR: PutAppend() return %s\n", reply.Err)
-			}
+		if ok && reply.Err == OK {
+			ck.leader = server
+			log.Printf("Client-%d %s finish: key=%s, value=%s, to node-%d\n", ck.clerkId, op, key, value, server)
+			return
 		}
+		if ok && reply.Err == ErrNoKey {
+			log.Printf("unknown error")
+			return
+		}
+		if ok && reply.Err == ErrWrongLeader {
+			time.Sleep(10 * time.Millisecond)
+		}
+		server = (server + 1) % len(ck.servers)
 	}
 }
 
