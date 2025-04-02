@@ -8,11 +8,15 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
-import "6.5840/shardctrler"
-import "time"
+import (
+	"crypto/rand"
+	"fmt"
+	"math/big"
+	"time"
+
+	"6.5840/labrpc"
+	"6.5840/shardctrler"
+)
 
 // which shard is a key in?
 // please use this function,
@@ -38,6 +42,8 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId    int64
+	nextTaskId int64
 }
 
 // the tester calls MakeClerk.
@@ -52,6 +58,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clerkId = nrand()
+	ck.nextTaskId = 0
 	return ck
 }
 
@@ -62,6 +70,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.ClerkId = ck.clerkId
+	args.TaskId = ck.nextTaskId
+	ck.nextTaskId++
 
 	for {
 		shard := key2shard(key)
@@ -71,14 +82,21 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
+				fmt.Printf("clerk-%d Get begin: taskid=%d, shard=%d, gid=%d, to server=%d, key=%s\n",
+					args.ClerkId, args.TaskId, shard, gid, si, key)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
+				if ok {
+					fmt.Printf("clerk-%d Get end: taskid=%d, state=%s, key=%s, value=%s\n", args.ClerkId, args.TaskId, reply.Err, key, reply.Value)
+				} else {
+					fmt.Printf("clerk-%d Get end: taskid=%d, state=notok", args.ClerkId, args.TaskId)
+				}
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
-				// ... not ok, or ErrWrongLeader
+				// ... not ok, or ErrWrongLeader, or ErrTimeOut
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -96,16 +114,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClerkId = ck.clerkId
+	args.TaskId = ck.nextTaskId
+	ck.nextTaskId++
 
 	for {
+		fmt.Printf("config: num=%d, shards=%v, groups=%v\n", ck.config.Num, ck.config.Shards, ck.config.Groups)
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+				fmt.Printf("clerk-%d %s begin: taskid=%d, shard=%d, gid=%d, to server=%d, key=%s, value=%s\n",
+					args.ClerkId, op, args.TaskId, shard, gid, si, key, value)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				if ok {
+					fmt.Printf("clerk-%d %s end: taskid=%d, state=%s\n", args.ClerkId, op, args.TaskId, reply.Err)
+				} else {
+					fmt.Printf("clerk-%d %s end: taskid=%d, state=notok\n", args.ClerkId, op, args.TaskId)
+				}
 				if ok && reply.Err == OK {
 					return
 				}
