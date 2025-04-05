@@ -18,6 +18,8 @@ import (
 	"6.5840/shardctrler"
 )
 
+const debugClient = true
+
 // which shard is a key in?
 // please use this function,
 // and please do not change it.
@@ -82,13 +84,17 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
-				fmt.Printf("clerk-%d Get begin: taskid=%d, shard=%d, gid=%d, to server=%d, key=%s\n",
-					args.ClerkId, args.TaskId, shard, gid, si, key)
+				if debugClient {
+					fmt.Printf("clerk-%d Get begin: taskid=%d, shard=%d, gid=%d, to server=%d, key=%s\n",
+						args.ClerkId, args.TaskId, shard, gid, si, key)
+				}
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok {
-					fmt.Printf("clerk-%d Get end: taskid=%d, state=%s, key=%s, value=%s\n", args.ClerkId, args.TaskId, reply.Err, key, reply.Value)
-				} else {
-					fmt.Printf("clerk-%d Get end: taskid=%d, state=notok", args.ClerkId, args.TaskId)
+				if debugClient {
+					if ok {
+						fmt.Printf("clerk-%d Get end: taskid=%d, state=%s, key=%s, value=%s\n", args.ClerkId, args.TaskId, reply.Err, key, reply.Value)
+					} else {
+						fmt.Printf("clerk-%d Get end: taskid=%d, state=notok\n", args.ClerkId, args.TaskId)
+					}
 				}
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
@@ -119,20 +125,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.nextTaskId++
 
 	for {
-		fmt.Printf("config: num=%d, shards=%v, groups=%v\n", ck.config.Num, ck.config.Shards, ck.config.Groups)
+		if debugClient {
+			fmt.Printf("config: num=%d, shards=%v, groups=%v\n", ck.config.Num, ck.config.Shards, ck.config.Groups)
+		}
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
-				fmt.Printf("clerk-%d %s begin: taskid=%d, shard=%d, gid=%d, to server=%d, key=%s, value=%s\n",
-					args.ClerkId, op, args.TaskId, shard, gid, si, key, value)
+				if debugClient {
+					fmt.Printf("clerk-%d %s begin: taskid=%d, shard=%d, gid=%d, to server=%d, key=%s, value=%s\n",
+						args.ClerkId, op, args.TaskId, shard, gid, si, key, value)
+				}
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok {
-					fmt.Printf("clerk-%d %s end: taskid=%d, state=%s\n", args.ClerkId, op, args.TaskId, reply.Err)
-				} else {
-					fmt.Printf("clerk-%d %s end: taskid=%d, state=notok\n", args.ClerkId, op, args.TaskId)
+				if debugClient {
+					if ok {
+						fmt.Printf("clerk-%d %s end: taskid=%d, state=%s\n", args.ClerkId, op, args.TaskId, reply.Err)
+					} else {
+						fmt.Printf("clerk-%d %s end: taskid=%d, state=notok\n", args.ClerkId, op, args.TaskId)
+					}
 				}
 				if ok && reply.Err == OK {
 					return

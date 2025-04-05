@@ -52,7 +52,7 @@ type InstallShardsArgs struct {
 	Gid       int
 	ConfigNum int
 	Shards    []int
-	Kvs       map[string]string
+	Kvs       []map[string]string
 }
 
 type InstallShardsReply struct {
