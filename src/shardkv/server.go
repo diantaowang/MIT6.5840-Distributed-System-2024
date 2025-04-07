@@ -95,10 +95,10 @@ type ShardKV struct {
 	lastTaskIds map[int64]int64
 	log         []Entry //need mutex
 
-	shards          [NShards]bool // current shards, need mutex.
-	lastSyncNum     int           // last movement task agreed by the current group.
-	movingTasks     []MoveTask    // shards being sent to other groups.
-	LastRecvMovTask map[int]int   // shards have been received from other groups.
+	shards         [NShards]bool // current shards, need mutex.
+	lastSyncNum    [NShards]int  // last movement task agreed by the current group.
+	LastRecvShards map[int]int   // shards have been received from other groups.
+	movingTasks    []MoveTask    // shards being sent to other groups.
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -302,20 +302,19 @@ func (kv *ShardKV) applyGetPutAppend(cmd int, clerkId int64, taskId int64, key s
 
 // the only entrance to add shards.
 func (kv *ShardKV) applyInstallShards(gid int, configNum int, shards []int, kvs []map[string]string) {
-	if configNum > kv.LastRecvMovTask[gid] {
-		kv.LastRecvMovTask[gid] = configNum
-		// NOTE: we must promise that update of kv.shards[] is atomic.
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		if debugShardkv {
-			fmt.Printf("applyInstallShards: gid-%d, server-%d, shards=%v, install shards=%v\n", kv.gid, kv.me, kv.shards, shards)
-		}
-		for i, shard := range shards {
+	if debugShardkv {
+		fmt.Printf("applyInstallShards: gid-%d, server-%d, shards=%v, lastRecvShards=%v; configNum=%d, install shards=%v\n",
+			kv.gid, kv.me, kv.shards, kv.LastRecvShards, configNum, shards)
+	}
+	kv.mu.Lock()
+	for i, shard := range shards {
+		if kv.LastRecvShards[shard] < configNum {
 			if kv.shards[shard] {
 				msg := fmt.Sprintf("ERROR: applyInstallShards: shard-%d (from group-%d) already exists in group-%d\n",
 					shard, gid, kv.gid)
 				log.Panic(msg)
 			}
+			kv.LastRecvShards[shard] = configNum
 			kv.shards[shard] = true
 			// NOTE: must make a copy of kvs. otherwise kvs[] will exists in kv.kvdb and raft's log.
 			// there is a race between key/value server modifying the map/slice and raft reading it
@@ -326,27 +325,25 @@ func (kv *ShardKV) applyInstallShards(gid int, configNum int, shards []int, kvs 
 			}
 			kv.kvdb[shard] = kvs2
 		}
-		if debugShardkv {
-			fmt.Printf("after applyInstallShards: gid-%d, server-%d, shards=%v\n", kv.gid, kv.me, kv.shards)
-		}
+	}
+	kv.mu.Unlock()
+	if debugShardkv {
+		fmt.Printf("after applyInstallShards: gid-%d, server-%d, shards=%v\n", kv.gid, kv.me, kv.shards)
 	}
 }
 
 // the only entrance to delete shards(kv.shards and kv.kvdb).
 func (kv *ShardKV) applySync(configNum int, shards []int, to [][]string) {
-	if configNum <= kv.lastSyncNum {
-		return
-	}
-	kv.lastSyncNum = configNum
 	// filter out expired shards.
 	// when apply a Sync, the server may lose shards in the Sync.
 	// we can't move these shards to other groups.
 	realShards := []int{}
 	realTo := [][]string{}
 	for i, shard := range shards {
-		if kv.shards[shard] {
-			realShards = append(realShards, shards[i])
+		if kv.shards[shard] && kv.lastSyncNum[shard] < configNum {
+			realShards = append(realShards, shard)
 			realTo = append(realTo, to[i])
+			kv.lastSyncNum[shard] = configNum
 		}
 	}
 	// generate moving task.
@@ -589,9 +586,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 			kv.shards[i] = true
 		}
 	}
-	kv.lastSyncNum = -1
+	kv.lastSyncNum = [NShards]int{}
 	kv.movingTasks = []MoveTask{}
-	kv.LastRecvMovTask = map[int]int{} // default value is 0.
+	kv.LastRecvShards = map[int]int{} // default value is 0.
 
 	go kv.scanSync()
 	go kv.applier()
