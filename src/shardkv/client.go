@@ -18,7 +18,7 @@ import (
 	"6.5840/shardctrler"
 )
 
-const debugClient = true
+const debugClient = false
 
 // which shard is a key in?
 // please use this function,

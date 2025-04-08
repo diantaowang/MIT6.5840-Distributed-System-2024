@@ -49,10 +49,11 @@ type GetReply struct {
 }
 
 type InstallShardsArgs struct {
-	Gid       int
-	ConfigNum int
-	Shards    []int
-	Kvs       []map[string]string
+	Gid         int
+	ConfigNum   int
+	Shards      []int
+	Kvs         []map[string]string
+	LastTaskIds map[int64]int64
 }
 
 type InstallShardsReply struct {
