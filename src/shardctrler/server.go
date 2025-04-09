@@ -430,7 +430,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
-	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
+	sc.rf = raft.Make(servers, -1, me, persister, sc.applyCh)
 
 	// Your code here.
 	sc.lastTaskIds = map[int64]int64{}
