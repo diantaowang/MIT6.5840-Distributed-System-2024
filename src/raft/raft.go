@@ -818,7 +818,7 @@ func (rf *Raft) applyToSM() {
 		rf.mu.Lock()
 		//fmt.Printf("applyToSM: gid-%d, node-%d, rf.lastApplied=%d, rf.commitIndex=%d, rf.lastIncludedIndex=%d\n",
 		//	rf.gid, rf.me, rf.lastApplied, rf.commitIndex, rf.lastIncludedIndex)
-		for rf.lastApplied == rf.commitIndex {
+		for rf.lastApplied == rf.commitIndex && !rf.killed() {
 			rf.cond.Wait()
 		}
 		//fmt.Printf("  -- applyToSM: gid-%d, node-%d, rf.lastApplied=%d, rf.commitIndex=%d, rf.lastIncludedIndex=%d\n",
@@ -870,6 +870,7 @@ func (rf *Raft) applyToSM() {
 			}
 		}
 	}
+	//fmt.Printf("applyToSM end: gid-%d, server-%d is killed\n", rf.gid, rf.me)
 	close(rf.applyCh)
 }
 
@@ -886,9 +887,6 @@ func (rf *Raft) genAppendEntriesArgs(server int, heartbeat bool) AppendEntriesAr
 	if truncLogIndex <= 0 {
 		args.PrevLogIndex = rf.lastIncludedIndex
 		args.PrevLogTerm = rf.lastIncludedTerm
-		/*if truncLogIndex < 0 {
-			fmt.Printf("node-%d need snapshot\n", server)
-		}*/
 	} else {
 		args.PrevLogTerm = rf.log[truncLogIndex-1].Term
 	}
@@ -1048,6 +1046,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.cond.Signal()
+	//fmt.Printf("Kill: gid-%d, server-%d, committed=%v\n", rf.gid, rf.me, rf.lastIncludedIndex+rf.commitIndex)
 }
 
 func (rf *Raft) killed() bool {
