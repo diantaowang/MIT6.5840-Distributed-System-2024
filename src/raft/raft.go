@@ -35,7 +35,7 @@ import (
 )
 
 // for debug
-var debugCommon = true
+var debugCommon = false
 var debugVote = false
 var debugAppend = false
 var debugSnapshot = false

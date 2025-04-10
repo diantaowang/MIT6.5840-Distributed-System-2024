@@ -1,20 +1,24 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "testing"
-import "os"
+import (
+	"os"
+	"testing"
 
-// import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "6.5840/raft"
-import "fmt"
-import "time"
-import "sync/atomic"
+	"6.5840/labrpc"
+
+	// import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"6.5840/raft"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -199,6 +203,7 @@ func (cfg *config) makeClient(to []int) *Clerk {
 		endnames[j] = randstring(20)
 		ends[j] = cfg.net.MakeEnd(endnames[j])
 		cfg.net.Connect(endnames[j], j)
+		ends[j].Server = j
 	}
 
 	ck := MakeClerk(random_handles(ends))

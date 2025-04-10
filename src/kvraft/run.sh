@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置参数
-NUM_RUNS=64         # 需要运行 40 次
+NUM_RUNS=32         # 需要运行 40 次
 MAX_PARALLEL=32     # 最多并行 32 个测试
 LOG_DIR="test_logs" # 存放日志的目录
 TIMEOUT="10m"       # 单个测试超时时间
@@ -14,7 +14,7 @@ echo "Logs will be saved in $LOG_DIR"
 
 # 运行测试的后台任务数
 running_jobs=0
-
+    
 # 运行 40 次测试
 for i in $(seq 1 $NUM_RUNS); do
     LOG_FILE="$LOG_DIR/test_run_$i.log"
@@ -22,7 +22,7 @@ for i in $(seq 1 $NUM_RUNS); do
 
     # 启动一个测试并保存日志
     (go test -timeout=$TIMEOUT -count=1 -v ./... > "$LOG_FILE" 2>&1) &
-    #(go test -timeout=$TIMEOUT -v -run TestSnapshotBasic3D > "$LOG_FILE" 2>&1) &
+    #(go test -timeout=$TIMEOUT -v -run TestPersistPartitionUnreliable4A > "$LOG_FILE" 2>&1) &
 
     # 计数正在运行的测试
     ((running_jobs++))

@@ -2,12 +2,14 @@ package kvraft
 
 import (
 	"crypto/rand"
-	"log"
+	"fmt"
 	"math/big"
 	"time"
 
 	"6.5840/labrpc"
 )
+
+const debug = false
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -55,15 +57,31 @@ func (ck *Clerk) Get(key string) string {
 	server := ck.leader
 	for {
 		reply.Err, reply.Value = "", ""
-		//log.Printf("Client-%d Get start: key=%s, to server-%d\n", ck.clerkId, key, ck.servers[server].Server)
-		log.Printf("Client-%d Get start: key=%s, to server-%d\n", ck.clerkId, key, server)
+
+		if debug {
+			fmt.Printf("Get begin: Client-%d, taskId=%d, key=%s, to server-%d\n",
+				ck.clerkId, args.TaskId, key, ck.servers[server].Server)
+		}
+
 		ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
+
+		if debug {
+			if !ok {
+				fmt.Printf("Get end: loss, Client-%d, taskId=%d, key=%s, to server-%d\n",
+					ck.clerkId, args.TaskId, key, ck.servers[server].Server)
+			} else if reply.Err == OK || reply.Err == ErrNoKey {
+				fmt.Printf("Get end: successful, Client-%d, taskId=%d, key=%s, to server-%d\n",
+					ck.clerkId, args.TaskId, key, ck.servers[server].Server)
+			} else {
+				fmt.Printf("Get end: wrong, Client-%d, taskId=%d, key=%s, to server-%d\n",
+					ck.clerkId, args.TaskId, key, ck.servers[server].Server)
+			}
+		}
+
 		// what situations lead to return false?
 		// (1) request loss (2) reply loss (3) server crash.
 		if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 			ck.leader = server
-			//log.Printf("Client-%d Get finish: key=%s, value=%s, to server-%d\n", ck.clerkId, key, reply.Value, ck.servers[server].Server)
-			log.Printf("Client-%d Get finish: key=%s, value=%s, to server-%d\n", ck.clerkId, key, reply.Value, server)
 			return reply.Value
 		}
 		if ok && reply.Err == ErrWrongLeader {
@@ -93,19 +111,35 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	server := ck.leader
 	for {
 		reply.Err = ""
-		//log.Printf("Client-%d %s begin: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, ck.servers[server].Server)
-		log.Printf("Client-%d %s begin: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, server)
+
+		if debug {
+			fmt.Printf("%s begin: Client-%d, taskId=%d, key=%s, value=%s, to server-%d\n",
+				op, ck.clerkId, args.TaskId, key, value, ck.servers[server].Server)
+		}
+
 		// what situations lead to return false?
 		// (1) request loss (2) reply loss (3) server crash.
 		ok := ck.servers[server].Call("KVServer."+op, &args, &reply)
+
+		if debug {
+			if !ok {
+				fmt.Printf("%s end: loss, Client-%d, taskId=%d, to server-%d\n",
+					op, ck.clerkId, args.TaskId, ck.servers[server].Server)
+			} else if reply.Err == OK {
+				fmt.Printf("%s end: successful, Client-%d, taskId=%d, to server-%d\n",
+					op, ck.clerkId, args.TaskId, ck.servers[server].Server)
+			} else {
+				fmt.Printf("%s end: wrong, Client-%d, taskId=%d, to server-%d\n",
+					op, ck.clerkId, args.TaskId, ck.servers[server].Server)
+			}
+		}
+
 		if ok && reply.Err == OK {
 			ck.leader = server
-			//log.Printf("Client-%d %s finish: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, ck.servers[server].Server)
-			log.Printf("Client-%d %s finish: key=%s, value=%s, to server-%d\n", ck.clerkId, op, key, value, server)
 			return
 		}
 		if ok && reply.Err == ErrNoKey {
-			log.Printf("unknown error")
+			fmt.Printf("unknown error")
 			return
 		}
 		if ok && reply.Err == ErrWrongLeader {

@@ -1,6 +1,9 @@
 package kvraft
 
 import (
+	"bytes"
+	"fmt"
+	"log"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -10,6 +13,8 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raft"
 )
+
+const debugServer = false
 
 const (
 	GET    = '0'
@@ -23,19 +28,19 @@ var OpCode = map[string]int{
 	"APPEND": APPEND,
 }
 
-const TIMEOUT = 1500 * time.Millisecond
+const TIMEOUT = 1200 * time.Millisecond
 const RoundTime = 10 * time.Millisecond
-const TryCount = 1500 / 10
+const TryCount = 1200 / 10
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClerkId int64
+	TaskId  int64
 	Cmd     int
 	Key     string
 	Value   string
-	ClerkId int64
-	TaskId  int64
 }
 
 type Entry struct {
@@ -54,18 +59,25 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvdb        map[string]string
-	lastTaskIds map[int64]int64
-	log         []Entry
+	kvdb         map[string]string
+	lastTaskIds  map[int64]int64
+	log          []Entry
+	prevLogIndex int
+	persister    *raft.Persister
+}
+
+type SnapShot struct {
+	Kvdb             map[string]string
+	LastTaskIds      map[int64]int64
+	LastIncludeIndex int // for debug
 }
 
 // Get/Put/Append from the same clerk has no concurrency promised by labrpc
 // (this situation does not match the actual network).
 // and Get/Put/Append from different clerks has concurrency.
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	op := Op{GET, args.Key, "", args.ClerkId, args.TaskId}
+	op := Op{args.ClerkId, args.TaskId, GET, args.Key, ""}
 	index, _, isLeader := kv.rf.Start(op)
-
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -73,10 +85,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	for i := 0; i <= TryCount; i++ {
 		kv.mu.Lock()
-		if len(kv.log) >= index {
-			if kv.log[index-1].clerkId == args.ClerkId && kv.log[index-1].taskId == args.TaskId {
+		if index <= kv.prevLogIndex {
+			reply.Err = ErrWrongLeader
+			kv.mu.Unlock()
+			return
+		} else if kv.prevLogIndex+len(kv.log) >= index {
+			truncIndex := index - kv.prevLogIndex
+			if kv.log[truncIndex-1].clerkId == args.ClerkId && kv.log[truncIndex-1].taskId == args.TaskId {
 				reply.Err = OK
-				reply.Value = kv.log[index-1].value
+				reply.Value = kv.log[truncIndex-1].value
 			} else {
 				reply.Err = ErrWrongLeader
 			}
@@ -92,7 +109,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply, oper string) {
-	op := Op{OpCode[oper], args.Key, args.Value, args.ClerkId, args.TaskId}
+	op := Op{args.ClerkId, args.TaskId, OpCode[oper], args.Key, args.Value}
 	index, _, isLeader := kv.rf.Start(op)
 
 	if !isLeader {
@@ -102,8 +119,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply, oper s
 
 	for i := 0; i <= TryCount; i++ {
 		kv.mu.Lock()
-		if len(kv.log) >= index {
-			if kv.log[index-1].clerkId == args.ClerkId && kv.log[index-1].taskId == args.TaskId {
+		if index <= kv.prevLogIndex {
+			reply.Err = ErrWrongLeader
+			kv.mu.Unlock()
+			return
+		} else if kv.prevLogIndex+len(kv.log) >= index {
+			truncIndex := index - kv.prevLogIndex
+			if kv.log[truncIndex-1].clerkId == args.ClerkId && kv.log[truncIndex-1].taskId == args.TaskId {
 				reply.Err = OK
 			} else {
 				reply.Err = ErrWrongLeader
@@ -127,18 +149,72 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.PutAppend(args, reply, "APPEND")
 }
 
+func (kv *KVServer) parseCmd(command interface{}) (int64, int64, int64, string, string) {
+	op := reflect.ValueOf(command)
+	clerkId := op.FieldByName("ClerkId").Int()
+	taskId := op.FieldByName("TaskId").Int()
+	cmd := op.FieldByName("Cmd").Int()
+	key := op.FieldByName("Key").String()
+	value := op.FieldByName("Value").String()
+	return clerkId, taskId, cmd, key, value
+}
+
+func (kv *KVServer) applySnapshot(data []byte, index int) {
+	if data == nil {
+		log.Fatalf("nil snapshot")
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var snapshot SnapShot
+	if d.Decode(&snapshot) != nil {
+		log.Fatalf("snapshot decode error")
+	}
+	if index != snapshot.LastIncludeIndex {
+		msg := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", kv.me)
+		log.Panic(msg)
+	}
+	kv.kvdb = snapshot.Kvdb
+	kv.lastTaskIds = snapshot.LastTaskIds
+	kv.mu.Lock()
+	kv.log = []Entry{}
+	kv.prevLogIndex = snapshot.LastIncludeIndex
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) sendSnapshot(lastIncludeIndex int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	snapshot := SnapShot{}
+	kvdb := map[string]string{}
+	for k, v := range kv.kvdb {
+		kvdb[k] = v
+	}
+	lastTaskIds := map[int64]int64{}
+	for k, v := range kv.lastTaskIds {
+		lastTaskIds[k] = v
+	}
+	snapshot.Kvdb = kvdb
+	snapshot.LastTaskIds = lastTaskIds
+	snapshot.LastIncludeIndex = lastIncludeIndex
+	e.Encode(snapshot)
+	kv.rf.Snapshot(lastIncludeIndex, w.Bytes())
+}
+
 func (kv *KVServer) applier() {
 	// raft will send close signal by chan when kvserver is killed.
 	for m := range kv.applyCh {
-		if m.CommandValid {
-			op := reflect.ValueOf(m.Command)
-			cmd := op.FieldByName("Cmd").Int()
-			key := op.FieldByName("Key").String()
-			value := op.FieldByName("Value").String()
-			clerkId := op.FieldByName("ClerkId").Int()
-			taskId := op.FieldByName("TaskId").Int()
-
+		if m.SnapshotValid {
+			kv.applySnapshot(m.Snapshot, m.SnapshotIndex)
+		} else if m.CommandValid {
+			clerkId, taskId, cmd, key, value := kv.parseCmd(m.Command)
 			lastTaskId, ok := kv.lastTaskIds[clerkId]
+
+			if debugServer {
+				fmt.Printf("@ apply begin: server-%d, clerkId=%d, taskId=%d, lastTaskId=%d, op=%d, key=%s, value=%s, newValue=%s\n",
+					kv.me, clerkId, taskId, lastTaskId, cmd-'0', key, value, kv.kvdb[key])
+			}
+
 			getValue := ""
 			if ok && lastTaskId >= taskId {
 				// duplicate, PUT/APPEND do nothing
@@ -155,13 +231,16 @@ func (kv *KVServer) applier() {
 				}
 				kv.lastTaskIds[clerkId] = taskId
 			}
-
-			/*fmt.Printf("@: clerkId=%d, taskId=%d, lastTaskId=%d, op=%d, key=%s, value=%s, newValue=%s\n",
-			clerkId, taskId, lastTaskId, cmd, key, value, kv.kvdb[key])*/
-
 			kv.mu.Lock()
 			kv.log = append(kv.log, Entry{clerkId, taskId, getValue})
 			kv.mu.Unlock()
+
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= 3*kv.maxraftstate {
+				kv.sendSnapshot(m.CommandIndex)
+			}
+			if debugServer {
+				fmt.Printf("@ apply end: server-%d, clerkId=%d, taskId=%d\n", kv.me, clerkId, taskId)
+			}
 		}
 	}
 }
@@ -209,12 +288,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf = raft.Make(servers, -1, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	kv.kvdb = map[string]string{}
 	kv.lastTaskIds = map[int64]int64{}
 	kv.log = []Entry{}
+	kv.prevLogIndex = 0
+	kv.persister = persister
 
 	go kv.applier()
 
