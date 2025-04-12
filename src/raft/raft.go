@@ -35,7 +35,7 @@ import (
 )
 
 // for debug
-var debugCommon = false
+var debugCommon = true
 var debugVote = false
 var debugAppend = false
 var debugSnapshot = false
@@ -231,7 +231,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 
 	dropNum := index - rf.lastIncludedIndex
-	//fmt.Printf("Snapshot: node-%d, dropNum= %d, index=%d, rf.lastIncludedIndex=%d\n",
+	//fmt.Printf("Snapshot: server-%d, dropNum= %d, index=%d, rf.lastIncludedIndex=%d\n",
 	//	rf.me, dropNum, index, rf.lastIncludedIndex)
 	// drop outdated snapshot
 	if dropNum > 0 {
@@ -320,8 +320,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		fmt.Println("RequestVote RPC:")
 		fmt.Printf("  Vote Req Context: CandidateId=%d, Term=%d, LastLogIndex=%d, LastLogTerm=%d\n",
 			args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
-		fmt.Printf("  Vote Raft Node:  node-%d, state=%d, currentTerm=%d, votedFor=%d\n",
-			rf.me, rf.state, rf.currentTerm, rf.votedFor)
+		term := rf.lastIncludedTerm
+		if len(rf.log) != 0 {
+			term = rf.log[len(rf.log)-1].Term
+		}
+		fmt.Printf("  Vote Raft Node:  server-%d, state=%d, currentTerm=%d, votedFor=%d, logLen=%d, lastLogTerm=%d\n",
+			rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.lastIncludedIndex+len(rf.log), term)
 	}
 
 	oldCurrentTerm := rf.currentTerm
@@ -336,8 +340,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// a raft node must be Follower when voteFor is null.
 	assert(!(rf.votedFor == -1 && rf.state != Follower), "votedFor == -1 && state != Follower")
 
+	// t0: server-0 timed out and sent RequestVote RPC to other nodes.
+	// t1: server-0 received enough votes except server-1. then server-0 became leader.
+	// t2: server-0 sent heartbeat to server-1. the heartbeat arrived server-1 before RequestVote.
+	//     server-1's currentTerm became the newest term. note that server-1 have voted for server-0
+	//     in the previous term.
+	// t3: server-0's RequestVote arrived server-1. it will cause
+	//     "args.Term == rf.currentTerm && rf.votedFor == args.CandidateId".
 	if args.Term == rf.currentTerm && rf.votedFor == args.CandidateId {
-		fmt.Printf("impossible: term == currentTerm && votedFor == CandidateId\n")
+		assert(rf.state == Follower, "ERROR: RequestVote")
+		reply.Term = args.Term
+		reply.VoteGranted = true
 	} else if args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		reply.Term = args.Term
 		reply.VoteGranted = false
@@ -385,17 +398,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	if debugAppend {
-		firstEntry := Entry{}
+		firstEntry, lastEntry := Entry{}, Entry{}
 		if len(args.Entries) != 0 {
 			firstEntry = args.Entries[0]
 		}
-		fmt.Println("AppendEntries RPC:")
-		fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, FirstEntry=%v, to-node-%d\n",
+		if len(rf.log) != 0 {
+			lastEntry = rf.log[len(rf.log)-1]
+		}
+		//fmt.Println("AppendEntries RPC:")
+		fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, FirstEntry=%v, to-server-%d\n",
 			args.ID, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), firstEntry, rf.me)
-		//fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, entries=%v, to-node-%d\n",
+		//fmt.Printf("  Append Context: ID=%d, LeaderId=%d, Term=%d, PrevLogIndex=%d, PrevLogTerm=%d, LeaderCommit=%d, EntryLen=%d, entries=%v, to-server-%d\n",
 		//	args.ID, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(args.Entries), args.Entries, rf.me)
-		fmt.Printf("  Append Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d, commitIndex=%d\n",
-			rf.me, rf.state, rf.currentTerm, len(rf.log), rf.lastIncludedIndex, rf.commitIndex)
+		fmt.Printf("  Append Raft Node:  server-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d, commitIndex=%d, lastEntry=%v\n",
+			rf.me, rf.state, rf.currentTerm, len(rf.log), rf.lastIncludedIndex, rf.commitIndex, lastEntry)
 	}
 
 	oldCurrentTerm := rf.currentTerm
@@ -412,8 +428,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		//fmt.Printf("server-%d ------------1\n", rf.me)
 	} else if args.Term == rf.currentTerm && rf.state == Leader {
-		fmt.Printf("impossible: AppendEntries, two leader in one Term\n")
+		log.Panic("impossible: AppendEntries, two leader in one term\n")
 	} else {
 		rf.state = Follower
 		rf.currentTerm = args.Term
@@ -427,11 +444,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		logIndex := args.PrevLogIndex - rf.lastIncludedIndex
 		if completeLogLen < args.PrevLogIndex {
 			reply.Success = false
+			//fmt.Printf("server-%d ------------2\n", rf.me)
 		} else if logIndex == 0 {
 			// NOTE: when rf log is empty, rf.lastIncludedTerm == args.PrevLogTerm == 0.
 			assert(rf.lastIncludedTerm == args.PrevLogTerm, "term conflict with committed log")
 			logChanged = rf.appendEntryToLog(0, 0, args)
 			reply.Success = true
+			//fmt.Printf("server-%d ------------3\n", rf.me)
 		} else if logIndex < 0 {
 			if args.PrevLogIndex+len(args.Entries) >= rf.lastIncludedIndex {
 				// in this branch, start > 0 and args.Entries is non-empty.
@@ -440,10 +459,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				logChanged = rf.appendEntryToLog(0, start, args)
 			}
 			reply.Success = true
+			//fmt.Printf("server-%d ------------4\n", rf.me)
 		} else {
 			if rf.log[logIndex-1].Term == args.PrevLogTerm {
 				logChanged = rf.appendEntryToLog(logIndex, 0, args)
 				reply.Success = true
+				//fmt.Printf("server-%d ------------5\n", rf.me)
 			} else {
 				// term conflict with log
 				conflict_term := rf.log[logIndex-1].Term
@@ -460,6 +481,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					reply.XIndex = rf.lastIncludedIndex + i + 1
 				}
 				reply.Success = false
+				//fmt.Printf("server-%d ------------6\n", rf.me)
 			}
 		}
 	}
@@ -476,7 +498,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if debugAppend {
-		fmt.Printf("  Append Reply: node-%d, logLen=%d, commitIndex=%d, reply.Term=%d, reply.Success=%t, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
+		fmt.Printf("  Append Reply: server-%d, logLen=%d, commitIndex=%d, reply.Term=%d, reply.Success=%t, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
 			rf.me, len(rf.log), rf.commitIndex, reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
 	}
 	if debugMutex {
@@ -496,7 +518,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		fmt.Println("InstallSnapshot RPC:")
 		fmt.Printf("  Install Context: ID=%d, LeaderId=%d, Term=%d, lastIncludedIndex=%d, lastIncludedTerm=%d, FirstData=%v, DataLen=%d\n",
 			args.ID, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludeTerm, args.Data[0], len(args.Data))
-		fmt.Printf("  Install Raft Node:  node-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d, lastIncludedTerm=%d\n",
+		fmt.Printf("  Install Raft Node:  server-%d, state=%d, currentTerm=%d, logLen=%d, lastIncludedIndex=%d, lastIncludedTerm=%d\n",
 			rf.me, rf.state, rf.currentTerm, len(rf.log), rf.lastIncludedIndex, rf.lastIncludedTerm)
 	}
 
@@ -508,7 +530,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 	} else if args.Term == rf.currentTerm && rf.state == Leader {
-		fmt.Printf("impossible: InstallSnapshot, two leader in one Term\n")
+		log.Panic("impossible: InstallSnapshot, two leader in one term\n")
 	} else {
 		rf.state = Follower
 		rf.currentTerm = args.Term
@@ -545,7 +567,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if debugSnapshot {
-		fmt.Printf("  Install Reply: node-%d, reply.Term=%d,  rf.state=%v, rf.lastIncludedIndex=%d, rf.lastIncludedTerm=%d, len(rf.log)=%d\n",
+		fmt.Printf("  Install Reply: server-%d, reply.Term=%d,  rf.state=%v, rf.lastIncludedIndex=%d, rf.lastIncludedTerm=%d, len(rf.log)=%d\n",
 			rf.me, reply.Term, rf.state, rf.lastIncludedIndex, rf.lastIncludedTerm, len(rf.log))
 	}
 	if debugMutex {
@@ -604,11 +626,14 @@ func (rf *Raft) appendEntryToLog(logStart int, entryStart int, args *AppendEntri
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 
-	/*if !ok {
-		fmt.Printf("Vote Failed: node-%d didn't get node-%d vote, package loss\n", rf.me, server)
-	} else if !reply.VoteGranted {
-		fmt.Printf("Vote Failed: node-%d didn't get node-%d vote, reject\n", rf.me, server)
-	}*/
+	if debugVote {
+		if !ok {
+			fmt.Printf("sendRequestVote: server-%d didn't get server-%d vote, package loss\n", rf.me, server)
+		} else {
+			fmt.Printf("sendRequestVote: server-%d -> server-%d: currentTerm=%d, args.Term=%d, reply.Term=%d, reply.VoteGranted=%v\n",
+				rf.me, server, rf.currentTerm, args.Term, reply.Term, reply.VoteGranted)
+		}
+	}
 	if debugMutex {
 		fmt.Printf("Before Lock: sendRequestVote, gid-%d, server-%d\n", rf.gid, rf.me)
 	}
@@ -649,6 +674,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if oldCurrentTerm != rf.currentTerm || oldVotedFor != rf.votedFor {
 		rf.persist()
 	}
+	if debugVote {
+		fmt.Printf("  -- after sendRequestVote: server-%d, state=%d, currentTerm=%d, votes=%d\n",
+			rf.me, rf.currentTerm, rf.state, rf.votes)
+	}
 	if debugMutex {
 		fmt.Printf("Before Unlock: sendRequestVote, gid-%d, server-%d\n", rf.gid, rf.me)
 	}
@@ -665,11 +694,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	if debugAppend {
 		if args.Term < rf.currentTerm {
-			fmt.Printf("**** reply from node-%d: ID=%d, outdated!\n", server, args.ID)
+			fmt.Printf("**** reply from server-%d: ID=%d, outdated!\n", server, args.ID)
 		} else if !ok {
-			fmt.Printf("**** reply from node-%d: ID=%d, package loss!\n", server, args.ID)
+			fmt.Printf("**** reply from server-%d: ID=%d, package loss!\n", server, args.ID)
 		} else {
-			fmt.Printf("**** reply from node-%d: ID=%d, reply.Term=%d, reply.Success=%v, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
+			fmt.Printf("**** reply from server-%d: ID=%d, reply.Term=%d, reply.Success=%v, reply.XTerm=%d, reply.XIndex=%d, reply.XLen=%d\n",
 				server, reply.ID, reply.Term, reply.Success, reply.XTerm, reply.XIndex, reply.XLen)
 		}
 	}
@@ -732,7 +761,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.persist()
 	}
 	if debugAppend && ok {
-		fmt.Printf("**** after reply: node-%d, nextIndex[%d]=%d, matchIndex[%d]=%d\n\n",
+		fmt.Printf("**** after reply: server-%d, nextIndex[%d]=%d, matchIndex[%d]=%d\n",
 			server, server, rf.nextIndex[server], server, rf.matchIndex[server])
 	}
 	if debugMutex {
@@ -816,12 +845,12 @@ func (rf *Raft) applyToSM() {
 			fmt.Printf("Before Lock: applyToSM, gid-%d, server-%d\n", rf.gid, rf.me)
 		}
 		rf.mu.Lock()
-		//fmt.Printf("applyToSM: gid-%d, node-%d, rf.lastApplied=%d, rf.commitIndex=%d, rf.lastIncludedIndex=%d\n",
+		//fmt.Printf("applyToSM: gid-%d, server-%d, rf.lastApplied=%d, rf.commitIndex=%d, rf.lastIncludedIndex=%d\n",
 		//	rf.gid, rf.me, rf.lastApplied, rf.commitIndex, rf.lastIncludedIndex)
 		for rf.lastApplied == rf.commitIndex && !rf.killed() {
 			rf.cond.Wait()
 		}
-		//fmt.Printf("  -- applyToSM: gid-%d, node-%d, rf.lastApplied=%d, rf.commitIndex=%d, rf.lastIncludedIndex=%d\n",
+		//fmt.Printf("  -- applyToSM: gid-%d, server-%d, rf.lastApplied=%d, rf.commitIndex=%d, rf.lastIncludedIndex=%d\n",
 		//	rf.gid, rf.me, rf.lastApplied, rf.commitIndex, rf.lastIncludedIndex)
 
 		// for debug
@@ -882,7 +911,7 @@ func (rf *Raft) genAppendEntriesArgs(server int, heartbeat bool) AppendEntriesAr
 	args.PrevLogIndex = rf.nextIndex[server] - 1
 	args.ID = rand.Int()
 	truncLogIndex := args.PrevLogIndex - rf.lastIncludedIndex
-	/*fmt.Printf("genAppendEntriesArgs: to node-%d, args.PrevLogIndex=%d, rf.lastIncludedIndex=%d\n",
+	/*fmt.Printf("genAppendEntriesArgs: to server-%d, args.PrevLogIndex=%d, rf.lastIncludedIndex=%d\n",
 	server, args.PrevLogIndex, rf.lastIncludedIndex)*/
 	if truncLogIndex <= 0 {
 		args.PrevLogIndex = rf.lastIncludedIndex
@@ -978,18 +1007,20 @@ func (rf *Raft) initLeader() {
 	// must hold mutex
 	rf.state = Leader
 	if debugCommon {
-		fmt.Printf("node-%d (term=%d) become leader\n", rf.me, rf.currentTerm)
+		fmt.Printf("server-%d (term=%d) become leader\n", rf.me, rf.currentTerm)
 	}
 	// add a blank no-op entry into log.
 	// NOTE: can't pass some tests in Lab3 due to defects in the tests.
-	// rf.log = append(rf.log, Entry{rf.currentTerm, nil})
-	// rf.persist()
+	rf.log = append(rf.log, Entry{rf.currentTerm, nil})
+	rf.persist()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			rf.nextIndex[i] = rf.lastIncludedIndex + len(rf.log) + 1
 			rf.matchIndex[i] = 0
 		}
 	}
+	//fmt.Printf("initLeader: server-%d, lastIncludedIndex=%d, lastIncludedTerm=%d, log=%v",
+	//	rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.log)
 	go rf.heartbeat()
 	go rf.appendEntiresOrSnapshot()
 }
@@ -1016,13 +1047,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return 0, 0, false
 	}
 
-	/*fmt.Printf("Start: node-%d, logLen=%d, currentTerm=%d, command=%v\n",
+	/*fmt.Printf("Start: server-%d, logLen=%d, currentTerm=%d, command=%v\n",
 	rf.me, len(rf.log), rf.currentTerm, command)*/
 	rf.log = append(rf.log, Entry{rf.currentTerm, command})
 	index := rf.lastIncludedIndex + len(rf.log)
 	term := rf.currentTerm
 	rf.persist()
-	//fmt.Printf("Start(): node-%d, state=%d, logLen=%d, new entry=%v\n", rf.me, rf.state, len(rf.log), command)
+	//fmt.Printf("Start(): server-%d, state=%d, logLen=%d, new entry=%v\n", rf.me, rf.state, len(rf.log), command)
 	rf.mu.Unlock()
 
 	select {
@@ -1099,11 +1130,11 @@ func (rf *Raft) ticker() {
 		timeNow := time.Now().UnixMilli()
 		rf.mu.Lock()
 		timeout := timeNow-rf.startTime > int64(rf.electionTime)
-		//fmt.Printf("node-%d: state=%d, now=%d, startTime=%d, electionTime=%d, passedTime=%d\n",
+		//fmt.Printf("server-%d: state=%d, now=%d, startTime=%d, electionTime=%d, passedTime=%d\n",
 		//	rf.me, rf.state, timeNow, rf.startTime, rf.electionTime, timeNow-rf.startTime)
 		if rf.state != Leader && timeout {
 			if debugCommon {
-				fmt.Printf("node-%d timeout\n", rf.me)
+				fmt.Printf("server-%d timeout\n", rf.me)
 			}
 			rf.election()
 		}
@@ -1138,7 +1169,6 @@ func Make(peers []*labrpc.ClientEnd, gid int, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
-	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
 
@@ -1157,11 +1187,16 @@ func Make(peers []*labrpc.ClientEnd, gid int, me int,
 	// initialize from state persisted before a crash
 	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.commitIndex = 0
 	rf.lastIncludedIndex = 0
 	rf.lastIncludedTerm = 0
 	rf.log = []Entry{}
 	rf.readPersist(persister.ReadRaftState())
 	rf.snapshot = persister.ReadSnapshot()
+
+	//fmt.Printf("\nInitial state: server-%d, currentTerm=%d, votedFor=%d, lastIncludedIndex=%d, lastIncludedTerm=%d\n",
+	//	rf.me, rf.currentTerm, rf.votedFor, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	//fmt.Printf("  log=%v\n", rf.log)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

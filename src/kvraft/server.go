@@ -180,6 +180,10 @@ func (kv *KVServer) applySnapshot(data []byte, index int) {
 	kv.log = []Entry{}
 	kv.prevLogIndex = snapshot.LastIncludeIndex
 	kv.mu.Unlock()
+	if debugServer {
+		fmt.Printf("After apply snapshot: server-%d, prevLogIndex=%d, kvdb=%v, lastTaskIds=%v\n",
+			kv.me, kv.prevLogIndex, kv.kvdb, kv.lastTaskIds)
+	}
 }
 
 func (kv *KVServer) sendSnapshot(lastIncludeIndex int) {
@@ -206,12 +210,19 @@ func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
 		if m.SnapshotValid {
 			kv.applySnapshot(m.Snapshot, m.SnapshotIndex)
+		} else if m.CommandValid && m.Command == nil {
+			if debugServer {
+				fmt.Printf("@ apply no-op: server-%d\n", kv.me)
+			}
+			kv.mu.Lock()
+			kv.log = append(kv.log, Entry{-1, -1, ""})
+			kv.mu.Unlock()
 		} else if m.CommandValid {
 			clerkId, taskId, cmd, key, value := kv.parseCmd(m.Command)
 			lastTaskId, ok := kv.lastTaskIds[clerkId]
 
 			if debugServer {
-				fmt.Printf("@ apply begin: server-%d, clerkId=%d, taskId=%d, lastTaskId=%d, op=%d, key=%s, value=%s, newValue=%s\n",
+				fmt.Printf("@ apply begin: server-%d, clerkId=%d, taskId=%d, lastTaskId=%d, op=%d, key=%s, value=%s, oldValue=%s\n",
 					kv.me, clerkId, taskId, lastTaskId, cmd-'0', key, value, kv.kvdb[key])
 			}
 
@@ -239,9 +250,20 @@ func (kv *KVServer) applier() {
 				kv.sendSnapshot(m.CommandIndex)
 			}
 			if debugServer {
-				fmt.Printf("@ apply end: server-%d, clerkId=%d, taskId=%d\n", kv.me, clerkId, taskId)
+				fmt.Printf("@ apply end: server-%d, clerkId=%d, taskId=%d, logIndex=%d, getValue=%s\n",
+					kv.me, clerkId, taskId, kv.prevLogIndex+len(kv.log)-1, getValue)
 			}
 		}
+	}
+	if debugServer {
+		fmt.Printf("server-%d dead: applier end\n", kv.me)
+	}
+}
+
+func (kv *KVServer) tick() {
+	for !kv.killed() {
+		log.Printf("tick! server-%d\n", kv.me)
+		time.Sleep(1000 * time.Millisecond)
 	}
 }
 
@@ -298,6 +320,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 
 	go kv.applier()
+	go kv.tick()
 
 	return kv
 }
