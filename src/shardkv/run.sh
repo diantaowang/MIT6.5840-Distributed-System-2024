@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置参数
-NUM_RUNS=2000         # 需要运行 40 次
+NUM_RUNS=10000         # 需要运行 40 次
 MAX_PARALLEL=32     # 最多并行 32 个测试
 LOG_DIR="test_logs" # 存放日志的目录
 TIMEOUT="10m"       # 单个测试超时时间
@@ -21,7 +21,8 @@ for i in $(seq 1 $NUM_RUNS); do
     echo "Starting test iteration $i (log: $LOG_FILE)..."
 
     # 启动一个测试并保存日志
-    (go test -timeout=$TIMEOUT -count=1 -v ./... > "$LOG_FILE" 2>&1) &
+    #(go test -timeout=$TIMEOUT -count=1 -v ./... > "$LOG_FILE" 2>&1) &
+    (go test -timeout=$TIMEOUT -v -run 'TestConcurrent3_5B' > "$LOG_FILE" 2>&1) &
     #(go test -timeout=$TIMEOUT -v -run 'TestStaticShards5A|TestRejection5A|TestJoinLeave5B|TestConcurrent2_5B' > "$LOG_FILE" 2>&1) &
     #(go test -timeout=$TIMEOUT -v -run 'TestUnreliable1_5B|TestUnreliable2_5B|TestUnreliable3_5B|TestChallenge1Delete|TestChallenge2Unaffected|TestChallenge2Partial' > "$LOG_FILE" 2>&1) &
 

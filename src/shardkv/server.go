@@ -153,7 +153,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	for i := 0; i <= TryCount; i++ {
+	for i := 0; i <= TryCount && !kv.killed(); i++ {
 		kv.mu.Lock()
 		if index <= kv.prevLogIndex {
 			reply.Err = ErrWrongLeader
@@ -175,7 +175,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			return
 		}
 		kv.mu.Unlock()
-		if i != TryCount {
+		if i != TryCount && !kv.killed() {
 			time.Sleep(RoundTime)
 		}
 	}
@@ -202,7 +202,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	for i := 0; i <= TryCount; i++ {
+	for i := 0; i <= TryCount && !kv.killed(); i++ {
 		kv.mu.Lock()
 		if index <= kv.prevLogIndex {
 			reply.Err = ErrWrongLeader
@@ -224,7 +224,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			return
 		}
 		kv.mu.Unlock()
-		if i != TryCount {
+		if i != TryCount && !kv.killed() {
 			time.Sleep(RoundTime)
 		}
 	}
@@ -246,7 +246,7 @@ func (kv *ShardKV) InstallShards(args *InstallShardsArgs, reply *InstallShardsRe
 		reply.Err = ErrWrongLeader
 		return
 	}
-	for i := 0; i <= TryCount; i++ {
+	for i := 0; i <= TryCount && !kv.killed(); i++ {
 		kv.mu.Lock()
 		if index <= kv.prevLogIndex {
 			reply.Err = ErrWrongLeader
@@ -263,14 +263,15 @@ func (kv *ShardKV) InstallShards(args *InstallShardsArgs, reply *InstallShardsRe
 			return
 		}
 		kv.mu.Unlock()
-		if i != TryCount {
+		if i != TryCount && !kv.killed() {
 			time.Sleep(RoundTime)
 		}
 	}
+	// time out or server is killed.
 	reply.Err = ErrTimeout
 }
 
-func (kv *ShardKV) scanSync() {
+func (kv *ShardKV) scanConfig() {
 	// create Clerk to pull config.
 	sm := shardctrler.MakeClerk(kv.ctrlers)
 	for !kv.killed() {
@@ -278,13 +279,13 @@ func (kv *ShardKV) scanSync() {
 		//if _, isLeader := kv.rf.GetState(); isLeader {
 		_, isLeader := kv.rf.GetState()
 		if debugShardkv {
-			fmt.Printf("scanSync: gid-%d: server-%d is leader = %v\n", kv.gid, kv.me, isLeader)
+			fmt.Printf("scanConfig: gid-%d: server-%d is leader = %v\n", kv.gid, kv.me, isLeader)
 		}
 		if isLeader {
 			newConfig := sm.Query(-1)
 			if debugShardkv {
 				kv.mu.Lock()
-				fmt.Printf("scanSync: gid-%d: server-%d, kv.shards=%v, newConfig=%v, movingTasks=%v\n",
+				fmt.Printf("scanConfig: gid-%d: server-%d, kv.shards=%v, newConfig=%v, movingTasks=%v\n",
 					kv.gid, kv.me, kv.shards, newConfig, kv.movingTasks)
 				kv.mu.Unlock()
 			}
@@ -292,8 +293,8 @@ func (kv *ShardKV) scanSync() {
 				diff := false
 				var movingShards []int
 				var to [][]string
-				// NOTE: we need promise that read of the whole kv.shards[] is atomic in scanSync().
-				// because execution of scanSync() and update of kv.shards[] is concurrent.
+				// NOTE: we need promise that read of the whole kv.shards[] is atomic in scanConfig().
+				// because execution of scanConfig() and update of kv.shards[] is concurrent.
 				kv.mu.Lock()
 				for shard, have := range kv.shards {
 					newGid := newConfig.Shards[shard]
@@ -304,20 +305,10 @@ func (kv *ShardKV) scanSync() {
 					diff = diff || (have != (kv.gid == newGid))
 				}
 				kv.mu.Unlock()
-				// TODO: send too much empty SYNC operation.
-				// we need send SYNC operation periodically even it is empty. otherwise, the server may
-				// not receive any committed log when it recovers form crash. the situation is as follow:
-				// (1) group-102 has shard-a, but the last configuration shows that group-101 should own
-				//     shard-a and group-102 should not own any shard.
-				// (2) group-102 crashes before sends shard-a to group-101.
-				// (3) group-102 recovers from crash. initially, the shard it owns is empty. And the latest
-				//     configuration shows that the shard it owns should also be empty. but it actually owns
-				//     shard-a.
-				// (4) the server in group-102 must send at least one empty SYNC operation to drive raft to
-				//     commit the previous log. otherwise, raft will not commit any log and shard-a will never
-				//     send to group-101.
-				op := Op{-1, -1, SYNC, "", "", -1, newConfig.Num, movingShards, to, []map[string]string{}, map[int64]int64{}}
-				kv.rf.Start(op)
+				if len(movingShards) != 0 {
+					op := Op{-1, -1, SYNC, "", "", -1, newConfig.Num, movingShards, to, []map[string]string{}, map[int64]int64{}}
+					kv.rf.Start(op)
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -447,7 +438,7 @@ func (kv *ShardKV) applySync(configNum int, shards []int, to [][]string) {
 	}
 }
 
-func (kv *ShardKV) applyRemove(configNum int) {
+func (kv *ShardKV) applyRemove(configNum int, shards []int) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if debugShardkv {
@@ -455,10 +446,30 @@ func (kv *ShardKV) applyRemove(configNum int) {
 			kv.gid, kv.me, configNum, kv.movingTasks)
 	}
 	if len(kv.movingTasks) != 0 && kv.movingTasks[0].ConfigNum == configNum {
-		if kv.movingTasks[0].ConfigNum == configNum {
+		// for debug
+		shards2 := []int{}
+		for _, slice := range kv.movingTasks[0].Shards {
+			shards2 = append(shards2, slice...)
+		}
+		exist, existCnt := false, 0
+		for _, a := range shards {
+			for _, b := range shards2 {
+				if a == b {
+					exist = true
+					existCnt++
+					break
+				}
+			}
+		}
+		if kv.movingTasks[0].ConfigNum == configNum && exist {
+			if len(shards) != len(shards2) || len(shards) != existCnt {
+				msg := fmt.Sprintf("ERROR: applyRemove-1: unmatched shards: configNum=%d, recv=%v, pending=%v\n",
+					configNum, shards, shards2)
+				log.Panic(msg)
+			}
 			kv.movingTasks = kv.movingTasks[1:]
 		} else if kv.movingTasks[0].ConfigNum < configNum {
-			msg := fmt.Sprintf("ERROR: applyRemove: first task configNum %d < %d\n",
+			msg := fmt.Sprintf("ERROR-2: applyRemove-2: first task configNum %d < %d\n",
 				kv.movingTasks[0].ConfigNum, configNum)
 			log.Panic(msg)
 		}
@@ -500,11 +511,14 @@ func (kv *ShardKV) applySnapshot(data []byte, index int) {
 	kv.mu.Unlock()
 }
 
-func (kv *ShardKV) sendInstallShards(wg *sync.WaitGroup, configNum int, servers []string, shards []int,
-	kvs []map[string]string, lastTaskIds map[int64]int64) {
+func (kv *ShardKV) sendShardsToGroup(wg *sync.WaitGroup, ch chan bool, configNum int, servers []string,
+	shards []int, kvs []map[string]string, lastTaskIds map[int64]int64) {
 	defer wg.Done()
 	for !kv.killed() {
 		for _, server := range servers {
+			if kv.killed() {
+				break
+			}
 			srv := kv.make_end(server)
 			var args InstallShardsArgs
 			var reply InstallShardsReply
@@ -515,18 +529,20 @@ func (kv *ShardKV) sendInstallShards(wg *sync.WaitGroup, configNum int, servers 
 			args.LastTaskIds = lastTaskIds
 			ok := srv.Call("ShardKV.InstallShards", &args, &reply)
 			if ok && (reply.Err == OK) {
+				ch <- true
 				return
 			}
 			if ok && (reply.Err == ErrWrongGroup || reply.Err == ErrNoKey) {
-				msg := "ERROR: sendInstallShards, reply.Err=" + reply.Err
+				msg := "ERROR: sendShardsToGroup, reply.Err=" + reply.Err
 				log.Panic(msg)
 			}
-			// ... not ok, or ErrWrongLeader, or ErrTimeout
+			// ... not ok, or ErrWrongLeader, or ErrTimeout, or server is killed.
 		}
 	}
+	ch <- false
 }
 
-func (kv *ShardKV) remove() {
+func (kv *ShardKV) shardsMovement() {
 	for !kv.killed() {
 		if _, isLeader := kv.rf.GetState(); isLeader {
 			task := MoveTask{}
@@ -537,18 +553,28 @@ func (kv *ShardKV) remove() {
 			}
 			kv.mu.Unlock()
 			if task.ConfigNum != -1 {
-				//fmt.Printf("remove begin: gid-%d, server-%d, task=%v\n", kv.gid, kv.me, task)
+				//fmt.Printf("shardsMovement begin: gid-%d, server-%d, task=%v\n", kv.gid, kv.me, task)
 				var wg sync.WaitGroup
+				ch := make(chan bool, len(task.To))
+				removedShards := []int{}
 				for i := 0; i < len(task.To); i++ {
 					wg.Add(1)
-					go kv.sendInstallShards(&wg, task.ConfigNum, task.To[i], task.Shards[i], task.Kvs[i], task.LastTaskIds)
+					removedShards = append(removedShards, task.Shards[i]...)
+					go kv.sendShardsToGroup(&wg, ch, task.ConfigNum, task.To[i], task.Shards[i], task.Kvs[i], task.LastTaskIds)
 				}
 				wg.Wait()
-				op := Op{-1, -1, REMOVE, "", "", -1, task.ConfigNum, []int{}, [][]string{}, []map[string]string{}, map[int64]int64{}}
-				// TODO: this server may not be leader, so Start() may fail.
-				// for performance, REMOVE should success except server crash.
-				kv.rf.Start(op)
-				//fmt.Printf("remove end: gid-%d, server-%d\n", kv.gid, kv.me)
+				close(ch)
+				allok := true
+				for ok := range ch {
+					allok = allok && ok
+				}
+				if allok {
+					op := Op{-1, -1, REMOVE, "", "", -1, task.ConfigNum, removedShards, [][]string{}, []map[string]string{}, map[int64]int64{}}
+					// TODO: this server may not be leader, so Start() may fail.
+					// for performance, REMOVE should success except server crash.
+					kv.rf.Start(op)
+				}
+				//fmt.Printf("shardsMovement end: gid-%d, server-%d\n", kv.gid, kv.me)
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -577,8 +603,8 @@ func (kv *ShardKV) sendSnapshot(lastIncludeIndex int) {
 	if debugShardkv {
 		fmt.Printf("sendSnapshot begin: gid-%d, server-%d, lastIncludeIndex=%d\n", kv.gid, kv.me, lastIncludeIndex)
 		if len(kv.movingTasks) != 0 {
-			fmt.Printf("kv.movingTasks:\n")
-			fmt.Printf("%s\n", printMoveTask(kv.movingTasks[0]))
+			fmt.Printf("  kv.movingTasks:\n")
+			fmt.Printf("  %s\n", printMoveTask(kv.movingTasks[0]))
 		}
 	}
 	w := new(bytes.Buffer)
@@ -607,11 +633,18 @@ func (kv *ShardKV) applier() {
 				fmt.Printf("applier snapshot: gid-%d, server-%d, m.SnapshotIndex=%d\n", kv.gid, kv.me, m.SnapshotIndex)
 			}
 			kv.applySnapshot(m.Snapshot, m.SnapshotIndex)
+		} else if m.CommandValid && m.Command == nil {
+			if debugShardkv {
+				fmt.Printf("applier: no-op, gid-%d, server-%d\n", kv.gid, kv.me)
+			}
+			kv.mu.Lock()
+			kv.log = append(kv.log, Entry{-1, -1, "", false, -1, -1})
+			kv.mu.Unlock()
 		} else if m.CommandValid {
 			clerkId, taskId, cmd, key, value, gid, configNum, shards, to, kvs, lastTaskIds := kv.parseOp(m.Command)
 			if debugShardkv {
-				fmt.Printf("applier: gid-%d, server-%d, committed=%d, clerkId=%d, taskId=%d, cmd=%s, key=%s, value=%s, gid=%d, configNum=%d, shards=%v, to=%v, kvs=%v\n",
-					kv.gid, kv.me, kv.prevLogIndex+len(kv.log), clerkId, taskId, OpName[int(cmd)], key, value, gid, configNum, shards, to, kvs)
+				fmt.Printf("applier: gid-%d, server-%d, committed=%d, clerkId=%d, taskId=%d, cmd=%s, key=%s, value=%s, gid=%d, configNum=%d, shards=%v\n",
+					kv.gid, kv.me, len(kv.log)+1, clerkId, taskId, OpName[int(cmd)], key, value, gid, configNum, shards)
 			}
 			getValue := ""
 			cancel := false
@@ -619,7 +652,7 @@ func (kv *ShardKV) applier() {
 				kv.applySync(int(configNum), shards, to)
 				gid = -1
 			} else if cmd == REMOVE {
-				kv.applyRemove(int(configNum))
+				kv.applyRemove(int(configNum), shards)
 				gid = -1
 			} else if cmd == INSTALL {
 				kv.applyInstallShards(int(gid), int(configNum), shards, kvs, lastTaskIds)
@@ -654,6 +687,10 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 	atomic.StoreInt32(&kv.dead, 1)
+	if debugShardkv {
+		fmt.Printf("Kill: gid-%d, server-%d, shards=%v, movingTasks=%v\n",
+			kv.gid, kv.me, kv.shards, kv.movingTasks)
+	}
 }
 
 func (kv *ShardKV) killed() bool {
@@ -727,9 +764,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.movingTasks = []MoveTask{}
 	kv.lastRecvShards = map[int]int{} // default value is 0.
 
-	go kv.scanSync()
+	go kv.scanConfig()
 	go kv.applier()
-	go kv.remove()
+	go kv.shardsMovement()
 
 	return kv
 }

@@ -35,7 +35,7 @@ import (
 )
 
 // for debug
-var debugCommon = true
+var debugCommon = false
 var debugVote = false
 var debugAppend = false
 var debugSnapshot = false
@@ -132,14 +132,14 @@ func assert(satisfied bool, s string) {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
+	term, isleader := 0, false
 	// Your code here (3A).
 	rf.mu.Lock()
-	term = rf.currentTerm
-	isleader = rf.state == Leader
-	rf.mu.Unlock()
+	defer rf.mu.Unlock()
+	if !rf.killed() {
+		term = rf.currentTerm
+		isleader = rf.state == Leader
+	}
 	return term, isleader
 }
 

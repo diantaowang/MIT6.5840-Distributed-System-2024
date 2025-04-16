@@ -375,7 +375,11 @@ func (sc *ShardCtrler) applyQuery(num int) Config {
 func (sc *ShardCtrler) applier() {
 	// raft will send close signal by chan when kvserver is killed.
 	for m := range sc.applyCh {
-		if m.CommandValid {
+		if m.CommandValid && m.Command == nil {
+			sc.mu.Lock()
+			sc.log = append(sc.log, Entry{-1, -1, Config{}})
+			sc.mu.Unlock()
+		} else if m.CommandValid {
 			clerkId, taskId, cmd, data := sc.parseCmd(m.Command)
 			lastTaskId, ok := sc.lastTaskIds[clerkId]
 			config := Config{}
